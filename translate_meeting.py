@@ -206,7 +206,7 @@ ASR_ENGINES = [
     ("moonshine", "Moonshine", "真串流，低延遲，僅英文"),
 ]
 
-APP_VERSION = "1.7.8"
+APP_VERSION = "1.7.9"
 
 # 常見 LLM 伺服器預設 port（供參考）
 LLM_PRESETS = [
@@ -1483,10 +1483,10 @@ def _input_interactive_menu(args):
         print(f"\n{C_DIM}{'─' * 60}{RESET}")
         print(f"  {C_OK}→ {mode_name}{RESET}  {C_DIM}辨識: {fw_model}{RESET}")
         if ollama_model:
-            print(f"  {C_OK}  翻譯: {ollama_model}{RESET}  {C_DIM}@ {ollama_host}:{ollama_port}{RESET}")
+            print(f"  {C_OK}  翻譯模型: {ollama_model}{RESET}  {C_DIM}@ {ollama_host}:{ollama_port}{RESET}")
         print(f"  {C_OK}  講者辨識: {diarize_desc}{RESET}")
         if do_summarize:
-            print(f"  {C_OK}  摘要: {summary_model}{RESET}  {C_DIM}@ {ollama_host}:{ollama_port}{RESET}")
+            print(f"  {C_OK}  摘要模型: {summary_model}{RESET}  {C_DIM}@ {ollama_host}:{ollama_port}{RESET}")
         print()
 
         return (mode_key, fw_model, ollama_model, summary_model,
@@ -3339,11 +3339,17 @@ def summarize_log_file(input_path, model, host, port, server_type="ollama"):
         merged_summary = call_ollama_raw(merge_prompt, model, host, port, spinner=sbar, live_output=True,
                                          server_type=server_type)
 
-        # 組合完整輸出：各段校正逐字稿 + 合併摘要
-        summary = ""
+        # 組合完整輸出：合併摘要在前，各段校正逐字稿在後
+        summary = merged_summary + "\n\n"
         for i, seg in enumerate(segment_summaries):
-            summary += f"--- 第 {i+1} 段 ---\n{seg}\n\n"
-        summary += f"--- 總結 ---\n{merged_summary}"
+            # 從各段摘要中提取校正逐字稿部分
+            marker = "## 校正逐字稿"
+            idx = seg.find(marker)
+            if idx >= 0:
+                transcript_part = seg[idx:].strip()
+            else:
+                transcript_part = seg.strip()
+            summary += f"--- 第 {i+1}/{len(segment_summaries)} 段 ---\n{transcript_part}\n\n"
 
     sbar.stop()
 
@@ -3382,11 +3388,19 @@ def _summary_to_html(summary_text, html_path, source_name="",
     lines = summary_text.split("\n")
     body_parts = []
     in_list = False  # 追蹤是否在 <ul> 內
+    in_ol = False  # 追蹤是否在 <ol> 內
+    in_nested_ol = False  # <ol> 巢狀在 <li> 內
     current_speaker = None  # 追蹤目前講者編號
     pending_br = False  # 延遲插入空行
     for line in lines:
         s = line.strip()
         if not s:
+            if in_ol:
+                body_parts.append("</ol>")
+                in_ol = False
+                if in_nested_ol:
+                    body_parts.append("</li>")
+                    in_nested_ol = False
             if in_list:
                 body_parts.append("</ul>")
                 in_list = False
@@ -3400,9 +3414,20 @@ def _summary_to_html(summary_text, html_path, source_name="",
                 body_parts.append("<br>")
             pending_br = False
 
-        # 離開列表模式
+        # 判斷項目類型
         is_list_item = s.startswith("- ")
-        if in_list and not is_list_item:
+        is_ol_item = bool(re.match(r'^\d+\.\s', s))
+
+        # 離開有序列表
+        if in_ol and not is_ol_item:
+            body_parts.append("</ol>")
+            in_ol = False
+            if in_nested_ol:
+                body_parts.append("</li>")
+                in_nested_ol = False
+
+        # 離開無序列表（有序項目不觸發，因為可能巢狀在 <li> 內）
+        if in_list and not is_list_item and not is_ol_item:
             body_parts.append("</ul>")
             in_list = False
 
@@ -3428,6 +3453,21 @@ def _summary_to_html(summary_text, html_path, source_name="",
             item = html_mod.escape(s[2:])
             item = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', item)
             body_parts.append(f'<li>{item}</li>')
+        elif is_ol_item:
+            if not in_ol:
+                if in_list and body_parts:
+                    # 巢狀：將 <ol> 放入上一個 <li> 內（移除其 </li>）
+                    for i in range(len(body_parts) - 1, -1, -1):
+                        if body_parts[i].startswith('<li>') and body_parts[i].endswith('</li>'):
+                            body_parts[i] = body_parts[i][:-5]  # 移除 </li>
+                            break
+                    in_nested_ol = True
+                body_parts.append("<ol>")
+                in_ol = True
+            m_ol = re.match(r'^\d+\.\s*(.*)', s)
+            ol_text = html_mod.escape(m_ol.group(1)) if m_ol else html_mod.escape(s)
+            ol_text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', ol_text)
+            body_parts.append(f'<li>{ol_text}</li>')
         elif re.match(r'^\*{0,2}(Speaker \d+|講者 ?\d+)', s):
             m = re.match(r'^\*{0,2}(?:Speaker |講者 ?)(\d+)', s)
             if m:
@@ -3443,6 +3483,10 @@ def _summary_to_html(summary_text, html_path, source_name="",
             else:
                 body_parts.append(f"<p>{escaped}</p>")
 
+    if in_ol:
+        body_parts.append("</ol>")
+        if in_nested_ol:
+            body_parts.append("</li>")
     if in_list:
         body_parts.append("</ul>")
 
@@ -3474,7 +3518,9 @@ def _summary_to_html(summary_text, html_path, source_name="",
   h1 {{ color: #82aaff; border-bottom: 2px solid #82aaff; padding-bottom: 8px; }}
   h2 {{ color: #c792ea; margin-top: 1.5em; }}
   ul {{ margin: 0.5em 0; padding-left: 1.5em; }}
+  ol {{ margin: 0.3em 0; padding-left: 1.5em; }}
   li {{ color: #a8d8a8; margin: 4px 0; }}
+  ol > li {{ color: #c8c8c8; }}
   hr {{ border: none; border-top: 1px solid #444; margin: 1.5em 0; }}
   p {{ margin: 0.4em 0; }}
   .speaker {{ font-weight: bold; margin-top: 1em; }}
@@ -3903,7 +3949,7 @@ def main():
         print(f"  {C_WHITE}辨識模型    {fw_model}{RESET}")
         if diarize:
             sp_info = f"啟用（{num_speakers} 人）" if num_speakers else "啟用（自動偵測）"
-            print(f"  {C_WHITE}講者辨識  {sp_info}{RESET}")
+            print(f"  {C_WHITE}講者辨識    {sp_info}{RESET}")
         print(f"  {C_WHITE}檔案數      {RESET}{C_DIM}{len(args.input)}{RESET}")
 
         # 逐檔處理
@@ -4046,10 +4092,16 @@ def main():
                 merged_summary = call_ollama_raw(merge_prompt, model, host, port, spinner=sbar, live_output=True,
                                                  server_type=server_type)
 
-                summary = ""
+                # 組合完整輸出：合併摘要在前，各段校正逐字稿在後
+                summary = merged_summary + "\n\n"
                 for i, seg in enumerate(segment_summaries):
-                    summary += f"--- 第 {i+1} 段 ---\n{seg}\n\n"
-                summary += f"--- 總結 ---\n{merged_summary}"
+                    marker = "## 校正逐字稿"
+                    idx = seg.find(marker)
+                    if idx >= 0:
+                        transcript_part = seg[idx:].strip()
+                    else:
+                        transcript_part = seg.strip()
+                    summary += f"--- 第 {i+1}/{len(segment_summaries)} 段 ---\n{transcript_part}\n\n"
 
             sbar._task = "完成"
             sbar.freeze()
