@@ -63,7 +63,7 @@ translate_meeting.py                      remote_whisper_server.py (FastAPI)
 | 語音辨識 (即時) | **Moonshine** (Useful Sensors) | 僅限本機 |
 | 語音辨識 (離線) | **faster-whisper** (CTranslate2) | 本機或遠端 GPU |
 | 講者辨識 | **resemblyzer** + **spectralcluster** | 本機或遠端 GPU |
-| 翻譯 / 摘要 | **Qwen 2.5** / **Phi-4** 等 LLM | 本機或區域網路 LLM 伺服器 |
+| 翻譯 / 摘要 | **Qwen 2.5** / **Phi-4** 等 LLM，或搭配使用者自行安裝的模型使用 | 本機或區域網路 LLM 伺服器 |
 | 翻譯 (離線備援) | **Argos Translate** | 僅限本機 |
 
 語音辨識引擎：
