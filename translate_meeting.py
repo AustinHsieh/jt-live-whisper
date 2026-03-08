@@ -4307,7 +4307,7 @@ def _select_audio_files():
         # 動態計算檔名欄寬度（取當頁最寬 + 2，最小 40）
         fname_col = max(max(_dw(os.path.basename(f)) for f, _ in page_files), 38) + 2
 
-        print(f"\n\n{C_TITLE}{BOLD}▎ 選擇音訊檔{RESET}  {C_DIM}（recordings/ 下共 {total} 個，顯示第 {start + 1}-{end} 個）{RESET}")
+        print(f"\n\n{C_TITLE}{BOLD}▎ 選擇音訊檔{RESET}  {C_WHITE}（recordings/ 下共 {total} 個，顯示第 {start + 1}-{end} 個）{RESET}")
         print(f"{C_DIM}{'─' * 60}{RESET}")
         for i, (fpath, mtime) in enumerate(page_files):
             num = start + i + 1
