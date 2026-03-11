@@ -348,6 +348,18 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 ### 4-1. 啟動
 
+先切換到安裝目錄：
+
+```bash
+# macOS
+cd ~/Apps/jt-live-whisper
+
+# Windows (PowerShell)
+cd C:\jt-live-whisper
+```
+
+啟動程式：
+
 ```bash
 # macOS
 ./start.sh
@@ -356,7 +368,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 .\start.ps1
 ```
 
-> **Windows 使用者請注意：** 以下範例以 macOS 指令為主。Windows 使用者請將 `./start.sh` 替換為 `.\start.ps1`，`./install.sh` 替換為 `.\install.ps1`。其餘參數完全相同。
+> **Windows 使用者請注意：** 以下範例以 macOS 指令為主。Windows 使用者請將 `./start.sh` 替換為 `.\start.ps1`，`./install.sh` 替換為 `.\install.ps1`，安裝目錄為 `C:\jt-live-whisper`。其餘參數完全相同。
 
 ### 4-2. 命令列參數（跳過選單直接啟動）
 

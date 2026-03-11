@@ -246,6 +246,18 @@ ollama pull qwen2.5:14b
 
 ### 4. 啟動
 
+先切換到安裝目錄：
+
+```bash
+# macOS
+cd ~/Apps/jt-live-whisper
+
+# Windows (PowerShell)
+cd C:\jt-live-whisper
+```
+
+啟動程式：
+
 ```bash
 # macOS
 ./start.sh
@@ -262,7 +274,7 @@ ollama pull qwen2.5:14b
 
 ## 使用方式
 
-> 以下範例以 macOS 指令為主。Windows 使用者請將 `./start.sh` 替換為 `.\start.ps1`，其餘參數完全相同。
+> 以下範例以 macOS 指令為主。Windows 使用者請將 `./start.sh` 替換為 `.\start.ps1`，安裝目錄為 `C:\jt-live-whisper`。其餘參數完全相同。
 
 ### 即時模式（預設，邊聽邊轉）
 
