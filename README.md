@@ -42,9 +42,10 @@ Author: Jason Cheng (Jason Tools)
 
 | 用途 | AI 模型 | 說明 |
 |------|---------|------|
-| 語音辨識 (ASR) | **Whisper** (OpenAI) | 開源語音辨識模型，支援中日英文，本地端 whisper.cpp 或 GPU 伺服器執行 |
-| 語音辨識 (ASR) | **Moonshine** (Useful Sensors) | 超低延遲串流辨識模型，英文專用（僅限本機） |
-| 語音辨識 (離線) | **faster-whisper** (CTranslate2) | 離線音訊檔處理，支援 VAD 靜音過濾，可在本機或 GPU 伺服器執行 |
+| 語音辨識 (ASR) | **whisper.cpp** | macOS 即時辨識引擎，支援中日英文，可在本機或 GPU 伺服器執行 |
+| 語音辨識 (ASR) | **faster-whisper** (CTranslate2) | Windows 即時辨識 + 全平台離線處理，支援 VAD 靜音過濾 |
+| 語音辨識 (ASR) | **mlx-whisper** | Apple Silicon GPU 加速，雙向模式（en_zh / ja_zh）即時辨識專用 |
+| 語音辨識 (ASR) | **Moonshine** (Useful Sensors) | 超低延遲串流辨識模型，英文專用（僅限 Apple Silicon） |
 | 翻譯 / 摘要 | 搭配自架 LLM 伺服器使用，推薦 **Qwen** / **Phi-4** / **GPT-OSS** 等模型 | 透過地端 Ollama 或其他 LLM 伺服器執行（本機或區域網路），翻譯建議 14B 以上、摘要建議 120B 以上 |
 | 翻譯 (離線) | **NLLB 600M** (Meta) | 離線翻譯模型，支援中日英互譯（`en2zh`/`zh2en`/`ja2zh`/`zh2ja`） |
 | 翻譯 (離線備援) | **Argos Translate** | 完全離線的輕量翻譯模型，僅支援英翻中 |

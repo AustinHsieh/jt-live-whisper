@@ -62,9 +62,10 @@ translate_meeting.py                            remote_whisper_server.py (FastAP
 
 | 用途 | AI 模型 | 執行位置 |
 |------|---------|----------|
-| 語音辨識 (即時) | **Whisper** (OpenAI) | 本機或 GPU 伺服器 |
-| 語音辨識 (即時) | **Moonshine** (Useful Sensors) | 僅限本機 |
-| 語音辨識 (離線) | **faster-whisper** (CTranslate2) | 本機或 GPU 伺服器 |
+| 語音辨識 (即時) | **whisper.cpp** | 本機或 GPU 伺服器 |
+| 語音辨識 (即時) | **faster-whisper** (CTranslate2) | 本機（Windows 即時 + 全平台離線） |
+| 語音辨識 (即時) | **mlx-whisper** | 僅限 Apple Silicon（雙向模式 GPU 加速） |
+| 語音辨識 (即時) | **Moonshine** (Useful Sensors) | 僅限 Apple Silicon |
 | 講者辨識 | **resemblyzer** + **spectralcluster** | 本機或 GPU 伺服器 |
 | 翻譯 / 摘要 | **Qwen 2.5** / **Phi-4** 等 LLM，或搭配使用者自行安裝的模型使用 | 本機或區域網路 LLM 伺服器 |
 | 翻譯 (離線) | **NLLB 600M** (Meta) | 僅限本機 |
