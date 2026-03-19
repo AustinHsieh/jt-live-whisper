@@ -1,5 +1,30 @@
 # Changelog
 
+### v2.14.3 (2026-03-19)
+
+**新功能**
+- WebUI 即時切換音訊裝置：點按底部裝置膠囊彈出 popup，可靜音/恢復或切換系統音訊/麥克風裝置（自動重啟子程序，約 2-3 秒中斷）
+- WebUI 裝置 popup 自動刷新裝置清單（每次開啟時查詢最新裝置）
+- translate_meeting.py 新增 `--mic-device ID` 參數，可指定麥克風裝置
+
+**改進**
+- WebUI 雙向模式（en_zh/ja_zh）辨識位置自動切換為本機，GPU 伺服器選項標記「不支援此模式」
+- WebUI GPU 伺服器模式下「轉錄麥克風」顯示醒目橘色提示方塊，說明原因與解法
+- WebUI 字幕模式切回對話模式時保留完整歷史訊息（不再清空）
+- WebUI 訊息上限 500 筆，超過時頂部顯示「僅顯示最近 500 筆，完整內容已寫入逐字稿記錄檔」
+- WebUI 各載入階段即時顯示進度：載入模型、連接 LLM、啟動 GPU 伺服器、等待就緒
+- WebUI 波形圖更新頻率從 1 秒改為 200ms，更即時反映音量
+- WebUI 狀態列格式統一：辨識「本機 large-v3-turbo」、翻譯「LLM qwen2.5:32b」
+- WebUI 子程序異常退出時顯示「啟動失敗」或「異常結束」（不再統一顯示「處理已完成」）
+- WebUI 子程序結束後終端機提示「按 Ctrl+C 可結束 WebUI 伺服器」
+- WebUI 切換裝置完成後清除底部「正在切換...」殘留文字
+- WebUI 裝置 popup 勾號改放右側，文字對齊
+- ASR prompt leak 過濾新增「請使用繁體中文」
+- `_webui_send` 自動清理 UTF-8 replacement character（`\ufffd`）
+- install.ps1 / install.sh 升級時版本相同但缺少 webui.py/webui.html 會自動補充安裝
+- install.ps1 whisper.cpp CUDA 編譯失敗時自動降級為 CPU 版
+- webui.py 重構：抽出 `_build_args()` 共用函式
+
 ### v2.14.2 (2026-03-19)
 
 **修正**

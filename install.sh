@@ -196,7 +196,7 @@ spinner_stop() {
 print_title() {
     echo ""
     echo -e "${C_TITLE}============================================================${NC}"
-    echo -e "${C_TITLE}${BOLD}  jt-live-whisper v2.14.2 - 100% 全地端 AI 語音工具集 - 安裝程式${NC}"
+    echo -e "${C_TITLE}${BOLD}  jt-live-whisper v2.14.3 - 100% 全地端 AI 語音工具集 - 安裝程式${NC}"
     echo -e "${C_TITLE}  by Jason Cheng (Jason Tools)${NC}"
     echo -e "${C_TITLE}============================================================${NC}"
     echo ""
@@ -1217,7 +1217,20 @@ do_upgrade() {
     echo -e "  ${C_WHITE}最新版本: v${remote_version:-未知}${NC}"
 
     if [ "$local_version" = "$remote_version" ]; then
-        check_ok "已經是最新版本 (v${local_version})"
+        # 版本相同但檢查是否缺少檔案
+        _missing=""
+        for _chk in webui.py webui.html; do
+            [ ! -f "$SCRIPT_DIR/$_chk" ] && _missing="$_missing $_chk"
+        done
+        if [ -n "$_missing" ]; then
+            echo -e "  ${C_WARN}版本相同但缺少檔案，補充安裝中...${NC}"
+            for _uf in translate_meeting.py start.sh start.ps1 install.sh install.ps1 SOP.md webui.py webui.html; do
+                [ -f "$repo_dir/$_uf" ] && cp "$repo_dir/$_uf" "$SCRIPT_DIR/$_uf"
+            done
+            check_ok "已補充安裝缺少的檔案（${_missing}）"
+        else
+            check_ok "已經是最新版本 (v${local_version})"
+        fi
         return 0
     fi
 

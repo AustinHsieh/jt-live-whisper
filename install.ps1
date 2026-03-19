@@ -301,7 +301,7 @@ $banner_line = '=' * $cols
 
 Write-Host ""
 Write-Host "${C_TITLE}${banner_line}${NC}"
-Write-Host "${C_TITLE}${BOLD}  jt-live-whisper v2.14.2 - 100% 全地端 AI 語音工具集 - Windows 安裝程式${NC}"
+Write-Host "${C_TITLE}${BOLD}  jt-live-whisper v2.14.3 - 100% 全地端 AI 語音工具集 - Windows 安裝程式${NC}"
 Write-Host "${C_TITLE}  by Jason Cheng (Jason Tools)${NC}"
 Write-Host "${C_TITLE}${banner_line}${NC}"
 Write-Host ""
@@ -346,7 +346,21 @@ if ($Upgrade) {
     Write-Host "  ${C_WHITE}最新版本: v${remoteVer}${NC}"
 
     if ($localVer -eq $remoteVer) {
-        check_ok "已經是最新版本 (v${localVer})"
+        # 版本相同但檢查是否缺少檔案（舊版升級可能漏掉新檔案）
+        $missingFiles = @()
+        foreach ($f in @("webui.py","webui.html")) {
+            if (-not (Test-Path (Join-Path $SCRIPT_DIR $f))) { $missingFiles += $f }
+        }
+        if ($missingFiles.Count -gt 0) {
+            info "版本相同但缺少檔案，補充安裝中..."
+            foreach ($f in @("translate_meeting.py","start.sh","start.ps1","install.sh","install.ps1","SOP.md","webui.py","webui.html")) {
+                $src = Join-Path $repoDir $f
+                if (Test-Path $src) { Copy-Item $src (Join-Path $SCRIPT_DIR $f) -Force }
+            }
+            check_ok "已補充安裝缺少的檔案（$($missingFiles -join '、')）"
+        } else {
+            check_ok "已經是最新版本 (v${localVer})"
+        }
         Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
         exit 0
     }
@@ -1125,6 +1139,20 @@ if ($true) {
 
             info "CMake 設定（${buildDesc}）..."
             $cmakeOutput = & cmake @cmakeArgs 2>&1
+
+            if ($LASTEXITCODE -ne 0 -and $buildDesc -eq "CUDA GPU 加速版") {
+                # CUDA 編譯失敗（常見：CUDA Toolkit 與 VS 整合不完整），自動降級為 CPU 版
+                check_warn "CUDA 編譯設定失敗，自動改用 CPU 版編譯"
+                info "（whisper.cpp 即時辨識改用 CPU，不影響 faster-whisper 的 CUDA 加速）"
+                info "若需 GPU 加速 whisper.cpp，請重新安裝 CUDA Toolkit 並勾選 Visual Studio Integration"
+                $cmakeArgs = $cmakeArgs | Where-Object { $_ -ne "-DGGML_CUDA=ON" }
+                $buildDesc = "CPU 版（CUDA 降級）"
+                if (Test-Path $buildDir) {
+                    Remove-Item $buildDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                info "CMake 設定（${buildDesc}）..."
+                $cmakeOutput = & cmake @cmakeArgs 2>&1
+            }
 
             if ($LASTEXITCODE -ne 0) {
                 check_fail "CMake 設定失敗"

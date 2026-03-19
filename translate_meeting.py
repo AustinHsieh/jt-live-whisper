@@ -713,7 +713,7 @@ ASR_ENGINES = [
     ("moonshine", "Moonshine", "真串流，低延遲，僅英文"),
 ]
 
-APP_VERSION = "2.14.2"
+APP_VERSION = "2.14.3"
 
 # ─── WebUI 暫停控制（SIGUSR1 toggle）──────────────────────────────
 _webui_pause_event = None  # 由各 streaming 函式設定
@@ -742,6 +742,10 @@ def _webui_send(event: dict):
     """非阻塞推送事件到 WebUI（未啟用時直接返回）"""
     if _webui_queue is not None:
         try:
+            # 清理 UTF-8 replacement character
+            for k in ("src_text", "dst_text", "detail"):
+                if k in event and isinstance(event[k], str):
+                    event[k] = event[k].replace("\ufffd", "")
             _webui_queue.put_nowait(event)
         except Exception:
             pass
@@ -1563,6 +1567,7 @@ class OllamaTranslator:
         if not skip_check:
             srv_label = "Ollama" if server_type == "ollama" else "LLM"
             print(f"{C_DIM}正在連接 {srv_label} ({model})...{RESET}", end=" ", flush=True)
+            _webui_send({"type": "progress", "stage": "載入中", "detail": f"連接 {srv_label}（{model}）"})
             try:
                 self._call_ollama("hello", [])
                 print(f"{C_OK}{BOLD}完成！{RESET}")
@@ -1819,6 +1824,7 @@ class ArgosTranslator:
             print(f"請執行 {_INSTALL_CMD} 重新安裝，或改用 LLM 伺服器翻譯", file=sys.stderr)
             sys.exit(1)
         print(f"{C_DIM}正在載入離線翻譯模型...{RESET}", end=" ", flush=True)
+        _webui_send({"type": "progress", "stage": "載入中", "detail": "離線翻譯模型"})
         self.sp = sentencepiece.SentencePieceProcessor()
         self.sp.Load(os.path.join(ARGOS_PKG_PATH, "sentencepiece.model"))
         self.ct2 = ctranslate2.Translator(
@@ -1910,6 +1916,7 @@ class NllbTranslator:
         self.tgt_lang = self._LANG_MAP[tgt_key]
         self.direction = direction
         print(f"{C_DIM}正在載入 NLLB 離線翻譯模型...{RESET}", end=" ", flush=True)
+        _webui_send({"type": "progress", "stage": "載入中", "detail": "NLLB 離線翻譯模型"})
         self.sp = sentencepiece.SentencePieceProcessor()
         self.sp.Load(os.path.join(NLLB_MODEL_DIR, "sentencepiece.bpe.model"))
         self.ct2 = ctranslate2.Translator(
@@ -3802,6 +3809,7 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
     # 監控 whisper-stream 的 stderr 來偵測啟動狀態
     # 等待模型載入完成
     print(f"{C_DIM}正在載入 whisper 模型（首次可能需要幾秒）...{RESET}", flush=True)
+    _webui_send({"type": "progress", "stage": "載入中", "detail": "whisper 模型"})
 
     # 用一個非阻塞方式讀 stderr
     def read_stderr():
@@ -3834,6 +3842,7 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
         "ja": "說日文即可看到字幕",
     }
     print(f"{C_OK}{BOLD}開始監聽...{RESET} {C_WHITE}{listen_hints.get(mode, '')}{RESET}\n\n", flush=True)
+    _webui_send({"type": "progress", "stage": "", "detail": ""})
     _webui_send({"type": "started", "mode": mode})
 
     # 設定底部固定狀態列（快捷鍵提示 + 即時資訊）
@@ -4120,6 +4129,7 @@ def run_stream_moonshine(capture_id: int, translator, moonshine_model_name: str,
     # 取得 Moonshine 模型
     arch = _moonshine_model_arch(moonshine_model_name)
     print(f"{C_DIM}正在載入 Moonshine 模型 ({moonshine_model_name})...{RESET}", flush=True)
+    _webui_send({"type": "progress", "stage": "載入中", "detail": f"Moonshine 模型（{moonshine_model_name}）"})
     model_path, model_arch = get_model_for_language("en", arch)
 
     # 翻譯記錄檔
@@ -4502,6 +4512,7 @@ def run_stream_moonshine(capture_id: int, translator, moonshine_model_name: str,
         "en": "說英文即可看到字幕",
     }
     print(f"{C_OK}{BOLD}開始監聽...{RESET} {C_WHITE}{listen_hints.get(mode, '')}{RESET}\n\n", flush=True)
+    _webui_send({"type": "progress", "stage": "", "detail": ""})
     _webui_send({"type": "started", "mode": mode})
 
     # 設定狀態列
@@ -4558,9 +4569,11 @@ def run_stream_remote(capture_id: int, translator, model_name: str,
     print(f"{C_DIM}{'─' * 60}{RESET}")
     rs_label = "重啟" if force_restart else "啟動"
     print(f"  {C_DIM}{rs_label}伺服器 Whisper 伺服器（{rw_host}）...{RESET}", end="", flush=True)
+    _webui_send({"type": "progress", "stage": "載入中", "detail": f"{rs_label} GPU 伺服器（{rw_host}）"})
     _inline_spinner(_remote_whisper_start, remote_cfg, force_restart=force_restart)
     print(f" {C_OK}✓{RESET}")
     print(f"  {C_DIM}等待伺服器就緒...{RESET}", end="", flush=True)
+    _webui_send({"type": "progress", "stage": "載入中", "detail": "等待 GPU 伺服器就緒"})
     try:
         ok, has_gpu = _inline_spinner(_remote_whisper_health, remote_cfg, timeout=30)
     except Exception:
@@ -4574,6 +4587,7 @@ def run_stream_remote(capture_id: int, translator, model_name: str,
     print(f" {C_OK}就緒（{gpu_label}）{RESET}")
     # 預熱：送一段靜音讓伺服器載入模型到 GPU（首次可能需 30-60 秒）
     print(f"  {C_DIM}載入模型 {C_WHITE}{model_name}{C_DIM} 到 {gpu_label}（首次可能需 30-60 秒）...{RESET}", end="", flush=True)
+    _webui_send({"type": "progress", "stage": "載入中", "detail": f"載入模型 {model_name} 到 {gpu_label}"})
     import numpy as _np_warmup
     _warmup_t0 = time.monotonic()
     try:
@@ -5009,6 +5023,7 @@ def run_stream_remote(capture_id: int, translator, model_name: str,
         "ja": "說日文即可看到字幕",
     }
     print(f"{C_OK}{BOLD}開始監聽...{RESET} {C_WHITE}{listen_hints.get(mode, '')}{RESET}\n\n", flush=True)
+    _webui_send({"type": "progress", "stage": "", "detail": ""})
     _webui_send({"type": "started", "mode": mode})
 
     _tr_model = translator.model if isinstance(translator, OllamaTranslator) else ("NLLB" if isinstance(translator, NllbTranslator) else ("Argos" if isinstance(translator, ArgosTranslator) else ""))
@@ -5142,10 +5157,12 @@ def run_stream_local_whisper(capture_id: int, translator, model_name: str,
         _sz = _fw_model_sizes.get(model_name, "")
         _sz_hint = f"（約 {_sz}）" if _sz else ""
         print(f"\n{C_WARN}首次使用 faster-whisper，正在下載模型 ({model_name}){_sz_hint}...{RESET}", flush=True)
+        _webui_send({"type": "progress", "stage": "載入中", "detail": f"下載 faster-whisper 模型（{model_name}）"})
         print(f"  {C_DIM}faster-whisper 格式與 whisper-stream 的 ggml 格式不同，需另外下載{RESET}")
         print(f"  {C_DIM}下載完成後會快取，之後不需重新下載{RESET}")
     else:
         print(f"\n{C_DIM}正在載入 Whisper 模型 ({model_name})...{RESET}", end="", flush=True)
+        _webui_send({"type": "progress", "stage": "載入中", "detail": f"Whisper 模型（{model_name}）"})
     t0 = time.monotonic()
     import warnings, logging
     _hf_logger = logging.getLogger("huggingface_hub")
@@ -5776,10 +5793,12 @@ def run_stream_bidirectional(lb_device_id, mic_device_id,
             _sz = _fw_model_sizes.get(model_name, "")
             _sz_hint = f"（約 {_sz}）" if _sz else ""
             print(f"\n{C_WARN}首次使用 mlx-whisper，正在下載模型 ({model_name}){_sz_hint}...{RESET}", flush=True)
+            _webui_send({"type": "progress", "stage": "載入中", "detail": f"下載 MLX Whisper 模型（{model_name}）"})
             print(f"  {C_DIM}mlx-whisper 使用 MLX 格式（Apple Silicon GPU 加速）{RESET}")
             print(f"  {C_DIM}下載完成後會快取，之後不需重新下載{RESET}")
         else:
             print(f"\n{C_DIM}正在載入 MLX Whisper 模型 ({model_name})...{RESET}", end="", flush=True)
+            _webui_send({"type": "progress", "stage": "載入中", "detail": f"MLX Whisper 模型（{model_name}）"})
         t0 = time.monotonic()
         # 用極短靜音 WAV 預熱（首次 transcribe 時才真正載入權重）
         import tempfile as _tempfile_warmup
@@ -5896,10 +5915,12 @@ def run_stream_bidirectional(lb_device_id, mic_device_id,
             _sz = _fw_model_sizes.get(model_name, "")
             _sz_hint = f"（約 {_sz}）" if _sz else ""
             print(f"\n{C_WARN}首次使用 faster-whisper，正在下載模型 ({model_name}){_sz_hint}...{RESET}", flush=True)
+            _webui_send({"type": "progress", "stage": "載入中", "detail": f"下載 faster-whisper 模型（{model_name}）"})
             print(f"  {C_DIM}雙向模式使用 faster-whisper 格式（與 whisper-stream 的 ggml 格式不同）{RESET}")
             print(f"  {C_DIM}下載完成後會快取，之後不需重新下載{RESET}")
         else:
             print(f"\n{C_DIM}正在載入 Whisper 模型 ({model_name})...{RESET}", end="", flush=True)
+            _webui_send({"type": "progress", "stage": "載入中", "detail": f"Whisper 模型（{model_name}）"})
         t0 = time.monotonic()
         import warnings, logging
         _hf_logger = logging.getLogger("huggingface_hub")
@@ -6170,8 +6191,8 @@ def run_stream_bidirectional(lb_device_id, mic_device_id,
     if model_name not in _PROMPT_CAPABLE_MODELS:
         _WHISPER_PROMPT = {"zh": None, "en": None, "ja": None}
     # 安全過濾：即使 prompt 洩漏到辨識結果，也會被移除
-    _PROMPT_LEAK_TEXTS = {"以下是繁體中文語音內容", "請使用繁體中文輸出",
-                          "以下是繁体中文语音内容", "请使用繁体中文输出",
+    _PROMPT_LEAK_TEXTS = {"以下是繁體中文語音內容", "請使用繁體中文輸出", "請使用繁體中文",
+                          "以下是繁体中文语音内容", "请使用繁体中文输出", "请使用繁体中文",
                           "以下は日本語の音声です"}
 
     if use_mlx:
@@ -6728,6 +6749,7 @@ def run_stream_bidirectional(lb_device_id, mic_device_id,
     else:
         _listen_mic_hint = f"{_mic_color}▶ 麥克風（{_mic_dir}）{RESET}"
     print(f"\n{C_OK}{BOLD}開始監聽...{RESET} {C_OK}◀ 系統音訊（{_lb_dir}）{RESET}  {_listen_mic_hint}\n\n", flush=True)
+    _webui_send({"type": "progress", "stage": "", "detail": ""})
     _webui_send({"type": "started", "mode": mode})
 
     _tr_model = translator_lb.model if isinstance(translator_lb, OllamaTranslator) else ("NLLB" if isinstance(translator_lb, NllbTranslator) else "")
@@ -11164,7 +11186,7 @@ def _push_rms(rms):
             hist.append(rms)
     # WebUI RMS（每 0.5 秒最多送一次，避免洪水）
     now = time.monotonic()
-    if _webui_queue is not None and now - _webui_rms_last[0] > 1.0:
+    if _webui_queue is not None and now - _webui_rms_last[0] > 0.2:
         _webui_rms_last[0] = now
         _webui_send({"type": "rms", "value": round(rms, 4)})
 
@@ -11513,6 +11535,9 @@ def parse_args():
     parser.add_argument(
         "--rec-device", type=int, metavar="ID",
         help="錄音裝置 ID (可與 ASR 裝置不同，例如聚集裝置可同時錄雙方聲音)")
+    parser.add_argument(
+        "--mic-device", type=int, metavar="ID",
+        help="麥克風裝置 ID（--mic 或雙向模式時指定麥克風輸入裝置）")
     parser.add_argument(
         "--input", nargs="+", metavar="FILE",
         help="離線處理音訊檔 (mp3/wav/m4a/flac 等，用 faster-whisper 辨識)")
@@ -12190,6 +12215,7 @@ def main():
         print(f"  {C_DIM}摘要模型: {model} ({host}:{port}){RESET}")
 
         print(f"  {C_DIM}正在連接 LLM 伺服器...{RESET}", end=" ", flush=True)
+        _webui_send({"type": "progress", "stage": "載入中", "detail": f"連接 LLM 伺服器（{host}:{port}）"})
         server_type = _detect_llm_server(host, port)
         if server_type:
             srv_label = "Ollama" if server_type == "ollama" else "OpenAI 相容"
@@ -12431,6 +12457,11 @@ def main():
                 print("[錯誤] 找不到系統音訊裝置或麥克風", file=sys.stderr)
                 sys.exit(1)
             _bidi_lb_id, _bidi_lb_name, _bidi_mic_id, _bidi_mic_name = bidi
+            # --mic-device 覆蓋自動偵測的麥克風
+            if getattr(args, 'mic_device', None) is not None:
+                import sounddevice as _sd_md
+                _bidi_mic_id = args.mic_device
+                _bidi_mic_name = _sd_md.query_devices(_bidi_mic_id)["name"]
             print(f"  {C_OK}系統音訊: {_bidi_lb_name}{RESET}")
             print(f"  {C_OK}麥克風:   {_bidi_mic_name}{RESET}")
 
@@ -12759,6 +12790,8 @@ def main():
                     args.mic = False
                 else:
                     _mic_lb_id, _, _mic_mic_id, _ = bidi_devs
+                    if getattr(args, 'mic_device', None) is not None:
+                        _mic_mic_id = args.mic_device
                     _use_mlx = _is_apple_silicon() and _has_mlx_whisper() and args.asr != "faster-whisper"
                     # 效能檢查：--mic 改用 faster-whisper/mlx-whisper，模型可能需要調整
                     _mic_rec_model = _recommended_whisper_model(mode)
@@ -12820,6 +12853,11 @@ def main():
                     print(f"  {C_WHITE}請確認 WASAPI Loopback 可用且有麥克風{RESET}")
                 sys.exit(1)
             _bidi_lb_id, _bidi_lb_name, _bidi_mic_id, _bidi_mic_name = bidi
+            # --mic-device 覆蓋自動偵測的麥克風
+            if getattr(args, 'mic_device', None) is not None:
+                import sounddevice as _sd_md
+                _bidi_mic_id = args.mic_device
+                _bidi_mic_name = _sd_md.query_devices(_bidi_mic_id)["name"]
             print(f"  {C_OK}系統音訊: {_bidi_lb_name}{RESET}")
             print(f"  {C_OK}麥克風:   {_bidi_mic_name}{RESET}")
 

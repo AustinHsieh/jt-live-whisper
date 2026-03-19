@@ -167,6 +167,7 @@ def _start_proc(args: list):
         _proc = subprocess.Popen(cmd, cwd=str(BASE_DIR),
                                  stdin=subprocess.PIPE,
                                  start_new_session=True)
+        _proc._start_time = time.monotonic()
         # 背景持續送 y 回答所有 input() 提問（確認開始、錄音、場景等）
         def _auto_yes():
             try:
@@ -182,11 +183,20 @@ def _start_proc(args: list):
         # 監控子程序結束，推送斷線事件到瀏覽器
         def _monitor():
             _proc.wait()
-            print(f"\n  主程式已結束，WebUI 等待下一次操作（瀏覽器中按「回到設定」重新開始）")
+            rc = _proc.returncode
+            elapsed = time.monotonic() - _proc._start_time if hasattr(_proc, '_start_time') else 999
+            if rc != 0 and elapsed < 5:
+                msg = f"啟動失敗（錯誤碼 {rc}），請檢查終端機訊息"
+            elif rc != 0:
+                msg = f"程式異常結束（錯誤碼 {rc}）"
+            else:
+                msg = "處理已完成"
+            print(f"\n  主程式已結束（exit code {rc}），WebUI 等待下一次操作（瀏覽器中按「回到設定」重新開始）")
+            print(f"  按 Ctrl+C 可結束 WebUI 伺服器")
             if _event_queue:
                 try:
                     _event_queue.put_nowait(json.dumps({"type": "disconnected",
-                        "message": "處理已完成"}))
+                        "message": msg}))
                 except Exception:
                     pass
         threading.Thread(target=_monitor, daemon=True).start()
@@ -323,7 +333,7 @@ def _get_config():
         "gpu_host": gpu_host, "summary_descs": summary_descs,
         "recommended_models": recommended_models,
         "default_engine": "llm" if llm_host else "nllb",
-        "last": last, "version": "2.14.2",
+        "last": last, "version": "2.14.3",
     }
 
 
@@ -421,11 +431,9 @@ async def api_test_llm(body: dict = {}):
     return JSONResponse({"ok": False, "error": f"無法連線 {host}（已嘗試 Ollama 和 OpenAI 相容 API）"})
 
 
-@app.post("/api/start")
-async def api_start(body: dict = {}):
-    """啟動 translate_meeting.py"""
+def _build_args(body: dict) -> list:
+    """從 start body 組裝 translate_meeting.py CLI 參數"""
     args = []
-    # 離線處理模式：讀入檔案
     input_files = body.get("input_files", [])
     if input_files:
         for f in input_files:
@@ -470,6 +478,16 @@ async def api_start(body: dict = {}):
     device = body.get("device")
     if device is not None and device != "":
         args.extend(["-d", str(device)])
+    mic_device = body.get("mic_device")
+    if mic_device is not None and mic_device != "":
+        args.extend(["--mic-device", str(mic_device)])
+    return args
+
+
+@app.post("/api/start")
+async def api_start(body: dict = {}):
+    """啟動 translate_meeting.py"""
+    args = _build_args(body)
     pid = _start_proc(args)
     # 儲存前次使用的設定到 config.json
     try:
@@ -490,6 +508,33 @@ async def api_start(body: dict = {}):
     except Exception:
         pass
     return {"status": "started", "pid": pid, "args": args}
+
+
+@app.post("/api/switch-device")
+async def api_switch_device(body: dict = {}):
+    """切換音訊裝置（停止子程序 → 用新裝置重新啟動）"""
+    start_body = body.get("start_body")
+    device_id = body.get("device_id")
+    device_type = body.get("device_type", "lb")  # "lb" or "mic"
+    if not start_body or device_id is None:
+        return JSONResponse({"ok": False, "error": "缺少參數"})
+    # 更新裝置 ID
+    if device_type == "mic":
+        start_body["mic_device"] = device_id
+    else:
+        start_body["device"] = device_id
+    # 廣播切換中事件
+    await broadcast(json.dumps({"type": "switching", "message": "正在切換音訊裝置..."}))
+    # 停止目前程序
+    _stop_proc()
+    await asyncio.sleep(0.5)
+    # 用新設定重新啟動
+    try:
+        args = _build_args(start_body)
+        pid = _start_proc(args)
+        return {"ok": True, "pid": pid, "device_id": device_id}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
 
 
 @app.post("/api/stop")

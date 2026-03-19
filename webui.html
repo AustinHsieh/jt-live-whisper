@@ -89,7 +89,17 @@ body:not(.has-live){overflow:auto}
 .timer{font-family:"SF Mono","Courier New",monospace;font-size:18px;color:var(--text);min-width:65px;font-weight:700;letter-spacing:2px;background:var(--section-bg);padding:3px 10px;border-radius:6px;border:1px solid var(--border-light);text-align:center;font-variant-numeric:tabular-nums}
 .vol-bar{display:flex;align-items:flex-end;gap:1px;height:22px;background:var(--section-bg);border:1px solid var(--border-light);border-radius:4px;padding:2px 4px}.vol-bar span{width:3px;background:var(--green);border-radius:1px;transition:height .15s}
 .sbadge{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 10px;border-radius:12px;font-weight:500}
+.dev-badge-wrap{position:relative;display:inline-flex}
 .dev-badge{transition:all .2s}.dev-badge.muted{opacity:.35;text-decoration:line-through;filter:grayscale(1)}
+.dev-badge.switching{opacity:.5;animation:devPulse 1s infinite}@keyframes devPulse{0%,100%{opacity:.5}50%{opacity:.8}}
+.dev-popup{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--card-bg);border:1px solid var(--border);border-radius:8px;box-shadow:var(--drop-shadow);z-index:200;min-width:240px;max-height:260px;overflow-y:auto;padding:4px}
+.dev-popup-title{font-size:11px;color:var(--text-dim);padding:6px 10px 4px;font-weight:600}
+.dev-popup-sep{height:1px;background:var(--border-light);margin:4px 8px}
+.dev-popup-item{padding:7px 12px;font-size:12px;border-radius:5px;cursor:pointer;display:flex;align-items:center;gap:6px;color:var(--text)}.dev-popup-item:hover{background:var(--sel-hover)}
+.dev-popup-item.active{color:var(--accent);font-weight:600;background:var(--sel-hover)}
+.dev-popup-item.active::after{content:"\2713";margin-left:auto;font-size:11px;flex-shrink:0}
+.dev-popup-item.disabled{opacity:.4;cursor:default}.dev-popup-item.disabled:hover{background:none}
+.dev-popup-note{font-size:11px;color:var(--text-dim);padding:6px 10px;line-height:1.4}
 .sbadge svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.5}
 .sbadge-mode{background:rgba(52,152,219,.15);color:#2980b9}.dark .sbadge-mode{background:rgba(121,192,255,.15);color:#79c0ff}
 .sbadge-model{background:rgba(142,68,173,.12);color:#8e44ad}.dark .sbadge-model{background:rgba(187,143,206,.15);color:#bb8fce}
@@ -275,6 +285,8 @@ const $=id=>document.getElementById(id),msgsEl=$('msgs'),dot=$('dot'),newBtn=$('
 let cnt=0,aScr=true,ws=null,rTimer=null,startTime=null,timerIv=null,_discShown=false;
 let curCfg={mode:'',modeLabel:'',model:'',engine:'',asrLoc:'',record:false,denoise:false,mic:false};
 let _autoLb='',_autoMic='';
+let _lastStartBody=null,_allDevices=[],_isSwitching=false,_curDeviceId=null,_curMicDeviceId=null;
+let _asrItemsCache=null,_asrLastVal='';
 let _recModels={},_cfgModels=[],_lastModel='';
 function _updateModelRec(mode){const recM=_recModels[mode]||'large-v3-turbo';const prev=cselVal($('iModel'));cselSetItems($('iModel'),_cfgModels.map(m=>{let t=tagFor(m.value,recM,_lastModel);if(m.value===recM&&t!=='前次使用')t='此裝置適合';return{value:m.value,label:m.label,tag:t}}));cselSetValue($('iModel'),prev||_lastModel||recM)}
 const _modeLabels={'en2zh':'英翻中字幕','zh2en':'中翻英字幕','ja2zh':'日翻中字幕','zh2ja':'中翻日字幕','en_zh':'英中雙向字幕','ja_zh':'日中雙向字幕','en':'英文轉錄','zh':'中文轉錄','ja':'日文轉錄','record':'純錄音'};
@@ -318,7 +330,7 @@ async function loadCfg(){
   cselSetItems($('iMode'),null,mG);cselSetValue($('iMode'),L.mode||'en2zh');
   // ASR loc
   const asrI=[{value:'gpu',label:'GPU 伺服器'+(c.gpu_host?' ('+c.gpu_host+')':''),tag:''},{value:'local',label:'本機',tag:''}];
-  cselSetItems($('iAsrLoc'),asrI);cselSetValue($('iAsrLoc'),L.local_asr?'local':(c.gpu_host?'gpu':'local'));
+  cselSetItems($('iAsrLoc'),asrI);_asrItemsCache=asrI;_asrLastVal=L.local_asr?'local':(c.gpu_host?'gpu':'local');cselSetValue($('iAsrLoc'),_asrLastVal);
   // Model, Scene, Engine
   _recModels=c.recommended_models||{};_cfgModels=c.models;_lastModel=L.model;
   _updateModelRec(cselVal($('iMode')));
@@ -333,6 +345,7 @@ async function loadCfg(){
   cselSetItems($('iDevice'),devI);cselSetValue($('iDevice'),'');cselSetItems($('iMicDev'),devI);cselSetValue($('iMicDev'),'');
   if(c.gpu_host){/*keep gpu*/}else{cselSetValue($('iAsrLoc'),'local')}
   // 顯示自動偵測的裝置
+  _allDevices=c.devices||[];
   _autoLb=c.auto_loopback?c.auto_loopback.replace(/^\[\d+\]\s*/,''):'';
   _autoMic=c.auto_mic?c.auto_mic.replace(/^\[\d+\]\s*/,''):'';
   if(c.auto_loopback)$('devAutoLb').innerHTML='<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(13,110,253,.1);color:var(--accent);padding:4px 10px;border-radius:6px;font-size:12px;line-height:1"><svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.5;flex-shrink:0;vertical-align:middle"><path d="M1 13.9V10.1C1 9 1.9 8.1 3 8.1H5.9L12.4 4C13.1 3.6 14 4.1 14 4.9V19.1C14 19.9 13.1 20.4 12.4 20L6.5 16H3C1.9 16 1 15 1 13.9Z"/><path d="M17.5 7.5C17.5 7.5 19 9 19 11.5S17.5 15.5 17.5 15.5" stroke-linecap="round"/></svg><span>自動偵測 → <b>'+c.auto_loopback.replace(/^\[\d+\]\s*/,'')+'</b></span></span>';
@@ -344,7 +357,7 @@ async function loadCfg(){
   if(L.summarize){$('iSummarize').checked=true;onSummarizeChg()}
   if(c.summary_descs)_sumDescs=c.summary_descs;
   _updateSumModels(c.llm_models.map(m=>m.value));cselSetValue($('iSumModel'),L.summary_model||'');
-  engChg();$('iMode').addEventListener('change',()=>{engChg();_updateModelRec(cselVal($('iMode')))});$('iEngine').addEventListener('change',engChg);
+  engChg();$('iMode').addEventListener('change',()=>{engChg();_updateModelRec(cselVal($('iMode')))});$('iEngine').addEventListener('change',engChg);$('iAsrLoc').addEventListener('change',engChg);
   const st=await(await fetch('/api/status')).json();if(st.running)showLive();
   $('cfgLoading').style.display='none';$('cfgCard').style.opacity='1';
 }
@@ -380,8 +393,14 @@ function engChg(){
   // 純錄音：只需模式 + 裝置
   $('rModelScene').style.display=isRec?'none':'';
   $('rOther').style.display=isRec?'none':'';
+  const isBidi=['en_zh','ja_zh'].includes(m);
   if(isRec){$('rAsrLoc').style.display='none';$('rOffline').style.display='none'}
   else{$('rOffline').style.display=isFile?'':'none'}
+  // 雙向模式：強制本機，GPU 不支援
+  if(isBidi&&!isFile){cselSetValue($('iAsrLoc'),'local');
+    const asrItems=[{value:'gpu',label:'GPU 伺服器（雙向模式不支援）',tag:'不支援此模式',disabled:true},{value:'local',label:'本機',tag:''}];
+    cselSetItems($('iAsrLoc'),asrItems);cselSetValue($('iAsrLoc'),'local');
+  }else if(!isRec&&_asrItemsCache){cselSetItems($('iAsrLoc'),_asrItemsCache);cselSetValue($('iAsrLoc'),_asrLastVal||'local')}
   // 根據模式標記不支援的引擎（反灰 + 不可選）
   const noArgos=['en_zh','ja_zh','zh2en','ja2zh','zh2ja'].includes(m);
   if(_allEngines.length){
@@ -397,6 +416,15 @@ function engChg(){
   const showLlm=cselVal($('iEngine'))==='llm'&&!isT;
   $('llmArea').classList.toggle('show',showLlm);
   if(showLlm&&!_llmQueried){const h=$('iLlmHost').value.trim();if(h){_llmQueried=true;fetchLlmModels(h)}}
+  // GPU 伺服器不支援 --mic
+  const isGpu=cselVal($('iAsrLoc'))==='gpu';
+  const micEl=$('iMic'),micLabel=micEl.parentElement;
+  let micNote=$('micGpuNote');
+  if(!micNote){micNote=document.createElement('div');micNote.id='micGpuNote';micNote.style.cssText='display:none;margin-top:8px;padding:8px 12px;border-radius:6px;font-size:12px;line-height:1.5;background:rgba(253,126,20,.1);color:var(--orange);border:1px solid rgba(253,126,20,.25)';micLabel.parentElement.parentElement.appendChild(micNote)}
+  if(!isFile&&!isRec){
+    if(isGpu){micEl.checked=false;micEl.disabled=true;micLabel.style.opacity='.5';micNote.style.display='block';micNote.innerHTML='<b>轉錄麥克風</b>需要本機辨識，GPU 伺服器模式不支援。<br>如需同時轉錄麥克風，請將辨識位置切換為「本機」。'}
+    else{micEl.disabled=false;micLabel.style.opacity='';micNote.style.display='none'}
+  }else{micNote.style.display='none'}
 }
 let _sumDescs={};
 function _sumLabel(m){const d=_sumDescs[m];return d?m+' — '+d:m}
@@ -420,7 +448,7 @@ async function go(){
   try{const b={mode,model:cselVal($('iModel')),scene:cselVal($('iScene')),engine:cselVal($('iEngine')),llm_model:cselVal($('iLlmModel')),llm_host:$('iLlmHost').value,topic:$('iTopic').value,record:$('iRec').checked,mic:$('iMic').checked,denoise:$('iDenoise').checked,local_asr:cselVal($('iAsrLoc'))==='local',device:cselVal($('iDevice'))||null};
   if(isFile&&_selectedFiles.length){b.input_files=_selectedFiles;if($('iDiarize').checked){b.diarize=true;const ns=parseInt($('iNumSpk').value)||0;if(ns>0)b.num_speakers=ns}if($('iSummarize').checked){b.summarize=true;const sm=cselVal($('iSumModel'));if(sm)b.summary_model=sm}}
   const r=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const d=await r.json();
-  if(d.status==='started'){showLive();$('hMode').textContent=curCfg.modeLabel}}catch(e){showToast('啟動失敗: '+e.message,'err')}
+  if(d.status==='started'){_lastStartBody=JSON.parse(JSON.stringify(b));_curDeviceId=b.device;showLive();$('hMode').textContent=curCfg.modeLabel}}catch(e){showToast('啟動失敗: '+e.message,'err')}
   $('goBtn').disabled=false;$('goBtn').textContent='開始';
 }
 let _stopConfirm=false;
@@ -430,21 +458,22 @@ async function stop(){
 }
 let _paused=false;
 function togglePause(){const next=!_paused;flash(next?'暫停':'繼續',()=>{_paused=next;$('pauseBtn').innerHTML=_paused?'繼續 <kbd>P</kbd>':'暫停 <kbd>P</kbd>';$('pauseBtn').style.background=_paused?'var(--green)':'var(--orange)';if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({action:_paused?'pause':'resume'}))})}
-function toggleSubMode(){const entering=!$('pLive').classList.contains('sub-mode');flash(entering?'字幕模式':'對話模式',()=>{const p=$('pLive');p.classList.toggle('sub-mode');$('subBtn').classList.toggle('active');$('subBtn').innerHTML=p.classList.contains('sub-mode')?'對話模式 <kbd>T</kbd>':'字幕模式 <kbd>T</kbd>';if(p.classList.contains('sub-mode')){const ms=msgsEl.querySelectorAll('.m:not(.leaving)');const arr=[...ms];while(arr.length>2)arr.shift().remove()}})}
+function _subModeLimit(){if(!$('pLive').classList.contains('sub-mode'))return;const ms=[...msgsEl.querySelectorAll('.m')];ms.forEach((m,i)=>{m.style.display=i>=ms.length-2?'':'none'})}
+function toggleSubMode(){const entering=!$('pLive').classList.contains('sub-mode');flash(entering?'字幕模式':'對話模式',()=>{const p=$('pLive');p.classList.toggle('sub-mode');$('subBtn').classList.toggle('active');$('subBtn').innerHTML=p.classList.contains('sub-mode')?'對話模式 <kbd>T</kbd>':'字幕模式 <kbd>T</kbd>';if(p.classList.contains('sub-mode')){_subModeLimit()}else{msgsEl.querySelectorAll('.m').forEach(m=>{m.style.display=''});requestAnimationFrame(()=>{msgsEl.scrollTop=msgsEl.scrollHeight})}})}
 function showLive(){$('pSetup').style.display='none';$('pLive').classList.add('on');document.body.classList.add('has-live');
   const isBidi=['en_zh','ja_zh'].includes(curCfg.mode);$('pLive').classList.toggle('bidi',isBidi);
   msgsEl.innerHTML='';cnt=0;_discShown=false;$('hCount').textContent='';$('sCount').textContent='0 句';
-  $('hMode').textContent=curCfg.modeLabel;$('sMode').textContent=curCfg.modeLabel;$('sModel').textContent=curCfg.model+' @ '+curCfg.asrLoc;
+  $('hMode').textContent=curCfg.modeLabel;$('sMode').textContent=curCfg.modeLabel;$('sModel').textContent=curCfg.asrLoc+' '+curCfg.model;
   const hasEng=curCfg.engine&&!['en','zh','ja','record'].includes(curCfg.mode);
-  const _eLbl=hasEng?(curCfg.engine==='llm'?'LLM: '+cselVal($('iLlmModel')):curCfg.engine.toUpperCase()):'';
+  const _eLbl=hasEng?(curCfg.engine==='llm'?'LLM '+cselVal($('iLlmModel')):'本機 '+curCfg.engine.toUpperCase()):'';
   $('sEngine').textContent=_eLbl;$('bTrans').style.display=hasEng?'inline-flex':'none';
   $('bRec').style.display=curCfg.record?'inline-flex':'none';$('bDenoise').style.display=curCfg.denoise?'inline-flex':'none';$('bMic').style.display=curCfg.mic?'inline-flex':'none';
   $('bDiarize').style.display=curCfg.diarize?'inline-flex':'none';$('bSummarize').style.display=curCfg.summarize?'inline-flex':'none';
   // 裝置資訊（可點按膠囊，靜音/恢復）— 檔案模式不顯示
   let _dvh='';
   if(!curCfg.isFile){
-  if(_autoLb)_dvh+='<span class="sbadge dev-badge" id="devLbBadge" onclick="toggleDevMute(this,\'lb\')" title="點按靜音/恢復系統音訊" style="background:rgba(13,110,253,.1);color:var(--accent);cursor:pointer"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.5"><path d="M1 13.9V10.1C1 9 1.9 8.1 3 8.1H5.9L12.4 4C13.1 3.6 14 4.1 14 4.9V19.1C14 19.9 13.1 20.4 12.4 20L6.5 16H3C1.9 16 1 15 1 13.9Z"/><path d="M17.5 7.5C17.5 7.5 19 9 19 11.5S17.5 15.5 17.5 15.5" stroke-linecap="round"/></svg> '+_autoLb+'</span> ';
-  if(_autoMic)_dvh+='<span class="sbadge dev-badge" id="devMicBadge" onclick="toggleDevMute(this,\'mic\')" title="點按靜音/恢復麥克風" style="background:rgba(25,135,84,.1);color:var(--green);cursor:pointer"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.5"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10V11C5 14.9 8.1 18 12 18S19 14.9 19 11V10" stroke-linecap="round"/></svg> '+_autoMic+'</span>';
+  if(_autoLb)_dvh+='<span class="dev-badge-wrap"><span class="sbadge dev-badge" id="devLbBadge" onclick="showDevPopup(this,\'lb\')" title="點按切換裝置或靜音" style="background:rgba(13,110,253,.1);color:var(--accent);cursor:pointer"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.5"><path d="M1 13.9V10.1C1 9 1.9 8.1 3 8.1H5.9L12.4 4C13.1 3.6 14 4.1 14 4.9V19.1C14 19.9 13.1 20.4 12.4 20L6.5 16H3C1.9 16 1 15 1 13.9Z"/><path d="M17.5 7.5C17.5 7.5 19 9 19 11.5S17.5 15.5 17.5 15.5" stroke-linecap="round"/></svg> <span class="dev-name">'+_autoLb+'</span></span></span> ';
+  if(_autoMic)_dvh+='<span class="dev-badge-wrap"><span class="sbadge dev-badge" id="devMicBadge" onclick="showDevPopup(this,\'mic\')" title="點按靜音/恢復" style="background:rgba(25,135,84,.1);color:var(--green);cursor:pointer"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.5"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10V11C5 14.9 8.1 18 12 18S19 14.9 19 11V10" stroke-linecap="round"/></svg> <span class="dev-name">'+_autoMic+'</span></span></span>';
   }
   $('bDevices').innerHTML=_dvh;
   $('pauseBtn').style.display=curCfg.isFile?'none':'';
@@ -472,26 +501,84 @@ function _renderMsg(ev){dot.classList.add('on');cnt++;$('hCount').textContent=cn
   let h=spkHtml+'<div class="m-t">'+(ev.timestamp||'')+'</div>';
   h+='<div class="m-s">'+asrBadge+'<span class="m-lang m-lang-src">'+esc(ev.src_lang||'')+'</span><span class="m-text">'+esc(ev.src_text)+'</span></div>';
   if(ev.dst_text)h+='<div class="m-d">'+trBadge+'<span class="m-lang m-lang-dst">'+esc(ev.dst_lang||'')+'</span><span class="m-text">'+esc(ev.dst_text)+'</span></div>';d.innerHTML=h;
-  // 字幕模式：保留最近 2 個，直接移除舊的
-  if($('pLive').classList.contains('sub-mode')){
-    while(msgsEl.children.length>=2)msgsEl.children[0].remove();
-  }
   msgsEl.appendChild(d);
+  // 訊息上限 500 筆（避免 DOM 過多影響效能）
+  const _mList=msgsEl.querySelectorAll('.m');
+  if(_mList.length>500){
+    while(msgsEl.querySelectorAll('.m').length>500){const old=msgsEl.querySelector('.m');if(old)old.remove();else break}
+    if(!$('msgLimitNote')){const n=document.createElement('div');n.id='msgLimitNote';n.style.cssText='text-align:center;padding:10px 16px;font-size:12px;color:var(--text-dim);background:var(--section-bg);border-radius:8px;margin:8px auto;max-width:360px';n.textContent='僅顯示最近 500 筆，完整內容已寫入逐字稿記錄檔';msgsEl.insertBefore(n,msgsEl.firstChild)}
+  }
+  // 字幕模式：只顯示最近 2 個（隱藏其他，不刪除）
+  if($('pLive').classList.contains('sub-mode'))_subModeLimit();
   if(aScr)requestAnimationFrame(()=>{msgsEl.scrollTop=msgsEl.scrollHeight})}
 /* WS */
 function conn(){const p=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(p+'//'+location.host+'/ws');ws.onopen=()=>{if(rTimer){clearInterval(rTimer);rTimer=null}};
-  ws.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type==='transcription')addMsg(ev);else if(ev.type==='started'){curCfg.modeLabel=_modeLabels[ev.mode]||ev.mode;curCfg.mode=ev.mode;showLive();dot.classList.add('on')}else if(ev.type==='stopped')showSetup();else if(ev.type==='disconnected'){dot.classList.remove('on');showDisconnected(ev.message||'主程式已結束')}else if(ev.type==='rms'&&ev.value!=null)pushVol(ev.value);else if(ev.type==='progress'){$('bInfo').textContent=ev.stage+(ev.detail?' — '+ev.detail:'')}}catch(x){}};
+  ws.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type==='transcription')addMsg(ev);else if(ev.type==='started'){curCfg.modeLabel=_modeLabels[ev.mode]||ev.mode;curCfg.mode=ev.mode;if(!_isSwitching){showLive()}dot.classList.add('on')}else if(ev.type==='stopped'&&!_isSwitching)showSetup();else if(ev.type==='disconnected'){if(_isSwitching)return;dot.classList.remove('on');showDisconnected(ev.message||'主程式已結束')}else if(ev.type==='switching'){$('bInfo').textContent=ev.message||'切換中...'}else if(ev.type==='rms'&&ev.value!=null)pushVol(ev.value);else if(ev.type==='progress'){$('bInfo').textContent=ev.stage+(ev.detail?' — '+ev.detail:'')}}catch(x){}};
   ws.onclose=()=>{dot.classList.remove('on');if($('pLive').classList.contains('on')&&!_discShown){_discShown=true;showDisconnected('與伺服器的連線已中斷')}if(!rTimer)rTimer=setInterval(()=>{if(!ws||ws.readyState===WebSocket.CLOSED)conn()},3000)};ws.onerror=()=>ws.close()}
 // Tooltips
 const _tips={iSource:'選擇即時擷取系統音訊，或讀入音訊檔案進行離線處理',iMode:'選擇翻譯方向或轉錄語言。雙向模式需使用耳機',iAsrLoc:'GPU 伺服器辨識速度快；本機不需網路但較慢',iModel:'較大的模型準確度較高但速度較慢',iScene:'緩衝長度越長句子越完整，越短反應越即時',iEngine:'LLM 品質最好需伺服器，NLLB/Argos 為本機離線',iLlmHost:'Ollama 或 OpenAI 相容伺服器的 IP:Port',iLlmModel:'選擇 LLM 伺服器上的翻譯模型',testBtn:'測試 LLM 伺服器連線並載入可用模型清單',iDevice:'擷取電腦播放的聲音（BlackHole / WASAPI Loopback）',iMicDev:'擷取本機麥克風或耳機的輸入',iTopic:'填寫會議主題可提升翻譯的上下文準確度',iRec:'同時將音訊錄製為檔案，儲存於 recordings/ 目錄',iMic:'同時轉錄麥克風輸入（ASR 負載加倍）',iDenoise:'啟用背景降噪（適合嘈雜環境，安靜環境可不勾）',goBtn:'啟動即時辨識或離線處理',stopBtn:'停止目前的辨識工作（按兩次確認）',pauseBtn:'暫停或繼續辨識（快捷鍵 P）',subBtn:'切換對話模式與字幕模式（快捷鍵 T）'};
 Object.entries(_tips).forEach(([id,tip])=>{const el=$(id);if(el)el.title=tip});
 loadCfg();conn();
-// 裝置靜音切換
-function toggleDevMute(el,type){
-  el.classList.toggle('muted');
-  const muted=el.classList.contains('muted');
-  if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({action:'mute',device:type,muted}));
-  showToast((type==='lb'?'系統音訊':'麥克風')+(muted?' 已靜音':' 已恢復'),'ok');
+// 裝置 popup（靜音 + 切換裝置）
+function _closeDevPopup(){document.querySelectorAll('.dev-popup').forEach(p=>p.remove())}
+document.addEventListener('click',e=>{if(!e.target.closest('.dev-popup')&&!e.target.closest('.dev-badge'))_closeDevPopup()});
+async function showDevPopup(badgeEl,type){
+  _closeDevPopup();if(_isSwitching)return;
+  // 刷新裝置清單
+  try{const r=await fetch('/api/config');const c=await r.json();_allDevices=c.devices||[]}catch(e){}
+  const wrap=badgeEl.closest('.dev-badge-wrap')||badgeEl.parentElement;
+  const pop=document.createElement('div');pop.className='dev-popup';pop.onclick=e=>e.stopPropagation();
+  const isLb=type==='lb';const label=isLb?'系統音訊裝置':'麥克風裝置';
+  // 標題
+  pop.innerHTML='<div class="dev-popup-title">'+label+'</div>';
+  // 靜音選項
+  const isMuted=badgeEl.classList.contains('muted');
+  const muteItem=document.createElement('div');muteItem.className='dev-popup-item';
+  muteItem.textContent=isMuted?'恢復音訊':'靜音';
+  muteItem.onclick=()=>{badgeEl.classList.toggle('muted');const m=badgeEl.classList.contains('muted');if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({action:'mute',device:type,muted:m}));showToast((isLb?'系統音訊':'麥克風')+(m?' 已靜音':' 已恢復'),'ok');_closeDevPopup()};
+  pop.appendChild(muteItem);
+  // 分隔線 + 裝置清單
+  if(_lastStartBody){
+    const sep=document.createElement('div');sep.className='dev-popup-sep';pop.appendChild(sep);
+    const devTitle=document.createElement('div');devTitle.className='dev-popup-title';devTitle.textContent='切換裝置';pop.appendChild(devTitle);
+    // 過濾裝置：lb 顯示所有有 input 的，mic 排除 blackhole/loopback
+    const devList=_allDevices.filter(d=>{
+      if(isLb)return true;
+      const n=d.name.toLowerCase();return !n.includes('blackhole')&&!n.includes('loopback')&&!n.includes('aggregate')&&!n.includes('聚集')&&d.channels>0});
+    const curId=isLb?_curDeviceId:_curMicDeviceId;
+    const curName=isLb?_autoLb:_autoMic;
+    devList.forEach(d=>{
+      const item=document.createElement('div');item.className='dev-popup-item';
+      const isCur=curId!==null?d.id===Number(curId):curName&&d.name.includes(curName);
+      if(isCur)item.classList.add('active');
+      item.textContent='['+d.id+'] '+d.name;
+      item.onclick=()=>{_closeDevPopup();if(!isCur)switchDevice(type,d.id,d.name)};
+      pop.appendChild(item)});
+  }else{
+    const sep=document.createElement('div');sep.className='dev-popup-sep';pop.appendChild(sep);
+    const note=document.createElement('div');note.className='dev-popup-note';note.textContent='從終端機啟動的工作不支援切換裝置。';pop.appendChild(note);
+  }
+  wrap.appendChild(pop);
+}
+async function switchDevice(type,deviceId,deviceName){
+  if(_isSwitching||!_lastStartBody)return;_isSwitching=true;
+  const isLb=type==='lb';
+  const badge=$(isLb?'devLbBadge':'devMicBadge');
+  const label=isLb?'系統音訊':'麥克風';
+  if(badge){badge.classList.add('switching');const nm=badge.querySelector('.dev-name');if(nm)nm.textContent='切換中...'}
+  try{
+    const r=await fetch('/api/switch-device',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({start_body:_lastStartBody,device_type:type,device_id:deviceId})});
+    const d=await r.json();
+    if(d.ok){
+      if(isLb){_lastStartBody.device=deviceId;_curDeviceId=deviceId;_autoLb=deviceName}
+      else{_lastStartBody.mic_device=deviceId;_curMicDeviceId=deviceId;_autoMic=deviceName}
+      if(badge){badge.classList.remove('switching');const nm=badge.querySelector('.dev-name');if(nm)nm.textContent=deviceName}
+      $('bInfo').textContent='';
+      showToast(label+'已切換為 '+deviceName,'ok');
+      const info=document.createElement('div');info.style.cssText='text-align:center;padding:8px;font-size:12px;color:var(--text-dim)';info.textContent='— '+label+'已切換為 '+deviceName+' —';msgsEl.appendChild(info);
+    }else{showToast('切換失敗: '+(d.error||''),'err');if(badge)badge.classList.remove('switching')}
+  }catch(e){showToast('切換失敗: '+e.message,'err');if(badge)badge.classList.remove('switching')}
+  setTimeout(()=>{_isSwitching=false},5000);
 }
 // 熱鍵：S=停止 P=暫停/繼續 T=切換字幕/對話
 document.addEventListener('keydown',e=>{
