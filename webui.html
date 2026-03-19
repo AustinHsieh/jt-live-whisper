@@ -40,7 +40,10 @@ body:not(.has-live){overflow:auto}
 @keyframes glow{0%,100%{box-shadow:0 0 12px rgba(74,222,128,.6)}50%{box-shadow:0 0 4px rgba(74,222,128,.2)}}
 .hdr-title{font-weight:700;font-size:17px}.hdr-ver{font-size:12px;opacity:.6}.hdr-stats{display:flex;gap:16px;font-size:13px;opacity:.8}
 .hdr-right{display:flex;gap:8px}.hdr-btn{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.2);color:#fff;padding:5px 14px;border-radius:20px;font-size:12px;cursor:pointer;transition:all .2s}.hdr-btn:hover{background:rgba(255,255,255,.25)}
-.setup{flex:1;overflow-y:auto;display:flex;justify-content:center;align-items:flex-start;padding:28px 16px}
+.setup{flex:1;overflow-y:auto;display:flex;flex-direction:column;justify-content:flex-start;align-items:center;padding:28px 16px}
+.cfg-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 0}
+.cfg-spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:28px;max-width:520px;width:100%;box-shadow:var(--shadow-lg);margin-bottom:32px}
 .card h2{font-size:19px;margin-bottom:6px}.card-sub{font-size:13px;color:var(--text-dim);margin-bottom:22px;padding-bottom:16px;border-bottom:1px solid var(--border-light)}
 .sec{background:var(--section-bg);border:1px solid var(--border-light);border-radius:var(--radius-sm);padding:18px 16px 16px;margin-bottom:28px;position:relative;margin-top:22px}
@@ -168,7 +171,8 @@ kbd{display:inline-block;font-family:inherit;font-size:10px;padding:1px 5px;bord
   <div class="hdr-right"><button class="hdr-btn" onclick="toggleTheme()" id="tBtn">深色主題</button></div>
 </div>
 <div class="setup" id="pSetup">
-<div class="card">
+<div class="cfg-loading" id="cfgLoading"><div class="cfg-spinner"></div><div style="margin-top:12px;color:var(--text-dim);font-size:14px">載入設定中...</div></div>
+<div class="card" id="cfgCard" style="opacity:0;transition:opacity .3s">
   <h2>即時辨識設定</h2>
   <div class="card-sub">設定完成後按下「開始」即可啟動即時辨識或離線處理</div>
   <!-- 輸入來源 -->
@@ -193,7 +197,7 @@ kbd{display:inline-block;font-family:inherit;font-size:10px;padding:1px 5px;bord
     <div class="sec-hint" id="asrHint">選擇辨識模式與引擎。雙向模式建議使用耳麥避免影響。場景的緩衝長度越長句子越完整，越短反應越即時。</div>
     <div class="fg"><label>功能模式</label><div class="csel" id="iMode" data-value=""></div></div>
     <div class="fg" id="rAsrLoc"><label>辨識位置</label><div class="csel" id="iAsrLoc" data-value=""></div></div>
-    <div class="row2" id="rModelScene">
+    <div id="rModelScene">
       <div class="fg"><label>辨識模型</label><div class="csel" id="iModel" data-value=""></div></div>
       <div class="fg" id="rScene"><label>場景</label><div class="csel" id="iScene" data-value=""></div></div>
     </div>
@@ -342,6 +346,7 @@ async function loadCfg(){
   _updateSumModels(c.llm_models.map(m=>m.value));cselSetValue($('iSumModel'),L.summary_model||'');
   engChg();$('iMode').addEventListener('change',()=>{engChg();_updateModelRec(cselVal($('iMode')))});$('iEngine').addEventListener('change',engChg);
   const st=await(await fetch('/api/status')).json();if(st.running)showLive();
+  $('cfgLoading').style.display='none';$('cfgCard').style.opacity='1';
 }
 function onSourceChg(){const isFile=cselVal($('iSource'))==='file';$('fileArea').classList.toggle('show',isFile);$('rDevices').style.display=isFile?'none':'';$('rScene').style.display=isFile?'none':'';$('rOffline').style.display=isFile?'':'none';$('rAsrLoc').style.display=isFile?'':'';$('iDenoise').parentElement.style.display=isFile?'none':'';$('iRec').parentElement.style.display=isFile?'none':'';$('iMic').parentElement.style.display=isFile?'none':'';$('asrHint').textContent=isFile?'選擇辨識模式與引擎。雙向模式建議使用耳麥避免影響。':'選擇辨識模式與引擎。雙向模式建議使用耳麥避免影響。場景的緩衝長度越長句子越完整，越短反應越即時。';if(isFile)loadFiles()}
 function onDiarizeChg(){$('rNumSpk').style.display=$('iDiarize').checked?'':'none'}

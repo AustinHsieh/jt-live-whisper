@@ -216,7 +216,7 @@ def _get_config():
             {"value": "large-v3-turbo", "label": "large-v3-turbo（快，準確度很好）"},
             {"value": "medium.en", "label": "medium.en（較慢，準確度很好）"},
             {"value": "medium", "label": "medium（較慢，多語言）"},
-            {"value": "large-v3", "label": "large-v3（最慢，中日文品質最好）"},
+            {"value": "large-v3", "label": "large-v3（最慢，中日文品質最好，有獨立 GPU 可選用）"},
         ]
     engines = [
         {"value": "llm", "label": "LLM — 品質最好，需 LLM 伺服器"},
@@ -315,7 +315,7 @@ def _get_config():
         "gpu_host": gpu_host, "summary_descs": summary_descs,
         "recommended_models": recommended_models,
         "default_engine": "llm" if llm_host else "nllb",
-        "last": last, "version": "2.14.0",
+        "last": last, "version": "2.14.1",
     }
 
 

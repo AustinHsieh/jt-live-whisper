@@ -1,5 +1,28 @@
 # Changelog
 
+### v2.14.1 (2026-03-19)
+
+**新功能**
+- WebUI 離線處理選項：講者辨識（含人數設定）、產生摘要（含摘要模型選擇，有專屬說明）
+- WebUI 離線處理各階段即時進度推送：辨識/講者辨識/輸出/LLM 校正/摘要，含模型名稱 + tokens 數 + t/s
+- WebUI 講者辨識時顯示彩色 Speaker N 標籤（8 色循環，與終端機一致）
+- WebUI 辨識模型依裝置 + 模式自動推薦（「此裝置適合」標籤，與終端機互動選單一致）
+- WebUI 翻譯引擎依 config 自動推薦（有 LLM 伺服器預設 LLM，無則預設 NLLB）
+- WebUI 防呆驗證：未選檔案、LLM 無主機/無模型、摘要無主機、重複啟動
+- WebUI 載入中 spinner 效果（API 回來前不顯示空白設定卡片）
+- start.ps1 支援 --webui
+- install.ps1 Whisper 模型下載改用 curl.exe 顯示進度條（Windows 10+ 內建）
+
+**改進**
+- WebUI 離線模式自動隱藏不適用選項：降噪、錄音至檔案、轉錄麥克風、音訊裝置、場景、暫停按鈕
+- WebUI 純錄音模式隱藏辨識模型/場景/翻譯引擎/離線選項/其他設定
+- WebUI 辨識模型與場景改為各佔一行（避免長標籤擠壓）
+- WebUI 辨識模型清單從 translate_meeting.py WHISPER_MODELS 動態產生（含 base.en / small.en / medium.en）
+- WebUI 摘要模型清單有專屬說明（與翻譯模型說明區分）
+- WebUI 提示文字依即時/離線模式動態切換
+- README.md 新增 WebUI 使用說明與截圖
+- 用語修正：拖放→拖曳
+
 ### v2.14.0 (2026-03-18)
 
 **新功能**
