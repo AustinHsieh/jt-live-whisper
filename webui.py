@@ -21,7 +21,7 @@ import webbrowser
 from pathlib import Path
 
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
     from fastapi.responses import HTMLResponse, JSONResponse
     import uvicorn
 except ImportError:
@@ -43,6 +43,43 @@ WEB_PORT = 19781
 BASE_DIR = Path(__file__).parent
 TRANSLATE_SCRIPT = BASE_DIR / "translate_meeting.py"
 CONFIG_FILE = BASE_DIR / "config.json"
+
+# ─── 安全設定 ──────────────────────────────────────────────────
+_webui_passwords = {"read": "", "admin": ""}  # 從 config.json 載入
+def _load_passwords():
+    if CONFIG_FILE.exists():
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            wp = cfg.get("webui_passwords", {})
+            _webui_passwords["read"] = wp.get("read", "")
+            _webui_passwords["admin"] = wp.get("admin", "")
+        except Exception:
+            pass
+_load_passwords()
+
+def _is_local(request) -> bool:
+    """判斷是否為本機連線"""
+    client = request.client.host if request.client else ""
+    return client in ("127.0.0.1", "::1", "localhost", "0.0.0.0")
+
+def _check_auth(request, level="read") -> str:
+    """檢查授權，回傳 None（通過）或錯誤訊息"""
+    if _is_local(request):
+        return None  # 本機不需密碼
+    if level == "admin":
+        if not _webui_passwords["admin"]:
+            return "未啟用遠端管理功能"
+        token = request.headers.get("X-Auth-Token", "")
+        if token != _webui_passwords["admin"]:
+            return "需要管理密碼"
+    elif level == "read":
+        if not _webui_passwords["read"]:
+            return None  # 唯讀密碼為空 = 不需密碼
+        token = request.headers.get("X-Auth-Token", "")
+        if token != _webui_passwords["read"] and token != _webui_passwords["admin"]:
+            return "需要密碼"
+    return None
+
 
 # ─── App ─────────────────────────────────────────────────────
 from contextlib import asynccontextmanager
@@ -333,7 +370,9 @@ def _get_config():
         "gpu_host": gpu_host, "summary_descs": summary_descs,
         "recommended_models": recommended_models,
         "default_engine": "llm" if llm_host else "nllb",
-        "last": last, "version": "2.14.3",
+        "last": last, "version": "2.14.4",
+        "has_read_pw": bool(_webui_passwords["read"]),
+        "has_admin_pw": bool(_webui_passwords["admin"]),
     }
 
 
@@ -347,8 +386,52 @@ async def index():
 
 
 @app.get("/api/config")
-async def api_config():
-    return JSONResponse(_get_config())
+async def api_config(request: Request):
+    err = _check_auth(request, "read")
+    if err:
+        return JSONResponse({"auth_required": True, "error": err, "is_local": _is_local(request)}, status_code=401)
+    cfg = _get_config()
+    cfg["is_local"] = _is_local(request)
+    return JSONResponse(cfg)
+
+
+@app.post("/api/auth")
+async def api_auth(request: Request, body: dict = {}):
+    """驗證密碼，回傳角色（admin/read/denied）"""
+    token = body.get("password", "")
+    if _is_local(request):
+        return {"role": "admin", "is_local": True}
+    if _webui_passwords["admin"] and token == _webui_passwords["admin"]:
+        return {"role": "admin"}
+    if not _webui_passwords["read"] or token == _webui_passwords["read"]:
+        return {"role": "read"}
+    return JSONResponse({"role": "denied", "error": "密碼錯誤"}, status_code=401)
+
+
+@app.get("/api/passwords")
+async def api_get_passwords(request: Request):
+    """取得密碼（僅本機）"""
+    if not _is_local(request):
+        return JSONResponse({"ok": False, "error": "僅限本機"}, status_code=403)
+    return {"read": _webui_passwords["read"], "admin": _webui_passwords["admin"]}
+
+
+@app.post("/api/save-passwords")
+async def api_save_passwords(request: Request, body: dict = {}):
+    """儲存安全設定密碼（僅本機可用）"""
+    if not _is_local(request):
+        return JSONResponse({"ok": False, "error": "僅限本機設定"}, status_code=403)
+    read_pw = body.get("read", "").strip()
+    admin_pw = body.get("admin", "").strip()
+    _webui_passwords["read"] = read_pw
+    _webui_passwords["admin"] = admin_pw
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8")) if CONFIG_FILE.exists() else {}
+        cfg["webui_passwords"] = {"read": read_pw, "admin": admin_pw}
+        CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), encoding="utf-8")
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
+    return {"ok": True}
 
 
 @app.get("/api/files")
@@ -485,8 +568,11 @@ def _build_args(body: dict) -> list:
 
 
 @app.post("/api/start")
-async def api_start(body: dict = {}):
+async def api_start(request: Request, body: dict = {}):
     """啟動 translate_meeting.py"""
+    err = _check_auth(request, "admin")
+    if err:
+        return JSONResponse({"status": "error", "error": err}, status_code=403)
     args = _build_args(body)
     pid = _start_proc(args)
     # 儲存前次使用的設定到 config.json
@@ -511,8 +597,11 @@ async def api_start(body: dict = {}):
 
 
 @app.post("/api/switch-device")
-async def api_switch_device(body: dict = {}):
+async def api_switch_device(request: Request, body: dict = {}):
     """切換音訊裝置（停止子程序 → 用新裝置重新啟動）"""
+    err = _check_auth(request, "admin")
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=403)
     start_body = body.get("start_body")
     device_id = body.get("device_id")
     device_type = body.get("device_type", "lb")  # "lb" or "mic"
@@ -538,7 +627,10 @@ async def api_switch_device(body: dict = {}):
 
 
 @app.post("/api/stop")
-async def api_stop():
+async def api_stop(request: Request):
+    err = _check_auth(request, "admin")
+    if err:
+        return JSONResponse({"status": "error", "error": err}, status_code=403)
     _stop_proc()
     # 廣播停止事件
     await broadcast(json.dumps({"type": "stopped"}))
@@ -554,6 +646,14 @@ async def api_status():
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    # WS auth：遠端需要 token query param
+    client_host = ws.client.host if ws.client else ""
+    is_local = client_host in ("127.0.0.1", "::1", "localhost", "0.0.0.0")
+    if not is_local and _webui_passwords["read"]:
+        token = ws.query_params.get("token", "")
+        if token != _webui_passwords["read"] and token != _webui_passwords["admin"]:
+            await ws.close(code=4001, reason="需要密碼")
+            return
     await ws.accept()
     connected_clients.append(ws)
     try:

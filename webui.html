@@ -42,6 +42,16 @@ body:not(.has-live){overflow:auto}
 .hdr-right{display:flex;gap:8px}.hdr-btn{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.2);color:#fff;padding:5px 14px;border-radius:20px;font-size:12px;cursor:pointer;transition:all .2s}.hdr-btn:hover{background:rgba(255,255,255,.25)}
 .setup{flex:1;overflow-y:auto;display:flex;flex-direction:column;justify-content:flex-start;align-items:center;padding:28px 16px}
 .cfg-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 0}
+.auth-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:999;display:flex;align-items:center;justify-content:center}
+.auth-box{background:var(--card-bg);border-radius:var(--radius);padding:32px;max-width:360px;width:90%;box-shadow:var(--shadow-lg);text-align:center}
+.auth-box h3{margin-bottom:8px;font-size:17px}.auth-box p{font-size:13px;color:var(--text-dim);margin-bottom:16px;line-height:1.5}
+.auth-box input{width:100%;padding:10px 12px;border:1px solid var(--input-border);border-radius:var(--radius-sm);background:var(--input-bg);color:var(--text);font-size:14px;margin-bottom:12px}
+.auth-box input:focus{outline:none;border-color:var(--input-focus)}
+.auth-box .auth-btns{display:flex;gap:8px;justify-content:center}
+.auth-box button{padding:8px 20px;border-radius:var(--radius-sm);border:none;cursor:pointer;font-size:13px;font-weight:600}
+.auth-box .auth-ok{background:var(--btn-bg);color:#fff}.auth-box .auth-ok:hover{background:var(--btn-hover)}
+.auth-box .auth-skip{background:var(--section-bg);color:var(--text-dim);border:1px solid var(--border)}.auth-box .auth-skip:hover{background:var(--border-light)}
+.auth-box .auth-err{color:var(--red);font-size:12px;margin-top:8px}
 .cfg-spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:28px;max-width:520px;width:100%;box-shadow:var(--shadow-lg);margin-bottom:32px}
@@ -258,6 +268,14 @@ kbd{display:inline-block;font-family:inherit;font-size:10px;padding:1px 5px;bord
       <label><input type="checkbox" id="iDenoise" checked> 降噪</label>
     </div>
   </div>
+  <!-- 安全設定（僅本機顯示）-->
+  <div class="sec" id="rSecurity" style="display:none">
+    <div class="sec-title"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2" stroke="currentColor"/><path d="M7 11V7a5 5 0 0110 0v4" stroke="currentColor" stroke-linecap="round"/></svg>安全設定</div>
+    <div class="sec-hint">設定遠端存取密碼。本機（localhost）存取不需密碼。</div>
+    <div class="fg"><label>唯讀密碼（選填）</label><div style="display:flex;gap:6px"><input type="password" id="iPwRead" placeholder="空白 = 不需密碼即可觀看字幕" style="flex:1"><button type="button" class="test-btn" onclick="togglePwVis('iPwRead',this)" style="flex-shrink:0;min-width:50px">顯示</button></div><div style="font-size:11px;color:var(--text-dim);margin-top:4px">遠端觀看即時字幕用，不能操作設定</div></div>
+    <div class="fg"><label>管理密碼（選填）</label><div style="display:flex;gap:6px"><input type="password" id="iPwAdmin" placeholder="空白 = 不啟用遠端管理" style="flex:1"><button type="button" class="test-btn" onclick="togglePwVis('iPwAdmin',this)" style="flex-shrink:0;min-width:50px">顯示</button></div><div style="font-size:11px;color:var(--text-dim);margin-top:4px" id="pwAdminHint">未設定 = 遠端無法啟動/停止/切換裝置</div></div>
+    <div style="margin-top:8px"><button class="test-btn" onclick="savePw()">儲存密碼</button><span id="pwResult" style="margin-left:8px;font-size:12px"></span></div>
+  </div>
   <button class="go-btn" id="goBtn" onclick="go()">開始</button>
 </div>
 </div>
@@ -321,7 +339,7 @@ function _llmLabel(n){const d=_modelDesc[n];return d?n+' — '+d:n}
 function _llmItems(models,lastV){return models.sort((a,b)=>a.localeCompare(b)).map(m=>({value:m,label:_llmLabel(m),tag:m===lastV?'前次使用':''}))}
 let _selectedFiles=[];
 async function loadCfg(){
-  const r=await fetch('/api/config'),c=await r.json();$('verLabel').textContent='v'+(c.version||'');const L=c.last||{};
+  const r=await fetch('/api/config',{headers:_authHeaders()}),c=await r.json();$('verLabel').textContent='v'+(c.version||'');const L=c.last||{};
   // Source
   cselSetItems($('iSource'),[{value:'live',label:'即時音訊擷取',tag:''},{value:'file',label:'讀入音訊檔案（離線處理）',tag:''}]);
   cselSetValue($('iSource'),'live');$('iSource').addEventListener('change',onSourceChg);
@@ -358,7 +376,19 @@ async function loadCfg(){
   if(c.summary_descs)_sumDescs=c.summary_descs;
   _updateSumModels(c.llm_models.map(m=>m.value));cselSetValue($('iSumModel'),L.summary_model||'');
   engChg();$('iMode').addEventListener('change',()=>{engChg();_updateModelRec(cselVal($('iMode')))});$('iEngine').addEventListener('change',engChg);$('iAsrLoc').addEventListener('change',engChg);
-  const st=await(await fetch('/api/status')).json();if(st.running)showLive();
+  const st=await(await fetch('/api/status',{headers:_authHeaders()})).json();
+  if(_authRole==='read'){
+    // 唯讀模式：有在執行就直接進字幕頁，否則顯示等待畫面
+    if(st.running){showLive()}
+    else{$('cfgLoading').innerHTML='<div style="text-align:center;color:var(--text-dim);font-size:14px;line-height:2">唯讀模式<br>等待主機開始辨識...</div>'}
+    return;
+  }
+  if(st.running)showLive();
+  // 安全設定（僅本機顯示）
+  if(c.is_local){
+    $('rSecurity').style.display='';
+    try{const pr=await fetch('/api/passwords');if(pr.ok){const pw=await pr.json();$('iPwRead').value=pw.read||'';$('iPwAdmin').value=pw.admin||''}}catch(e){}
+  }
   $('cfgLoading').style.display='none';$('cfgCard').style.opacity='1';
 }
 function onSourceChg(){const isFile=cselVal($('iSource'))==='file';$('fileArea').classList.toggle('show',isFile);$('rDevices').style.display=isFile?'none':'';$('rScene').style.display=isFile?'none':'';$('rOffline').style.display=isFile?'':'none';$('rAsrLoc').style.display=isFile?'':'';$('iDenoise').parentElement.style.display=isFile?'none':'';$('iRec').parentElement.style.display=isFile?'none':'';$('iMic').parentElement.style.display=isFile?'none':'';$('asrHint').textContent=isFile?'選擇辨識模式與引擎。雙向模式建議使用耳麥避免影響。':'選擇辨識模式與引擎。雙向模式建議使用耳麥避免影響。場景的緩衝長度越長句子越完整，越短反應越即時。';if(isFile)loadFiles()}
@@ -442,19 +472,19 @@ async function go(){
   if(needLlm&&!cselVal($('iLlmModel'))){showToast('請先測試連線並選擇 LLM 模型','err');return}
   if(isFile&&$('iSummarize').checked&&!$('iLlmHost').value.trim()){showToast('產生摘要需要 LLM 伺服器，請填寫 LLM 主機地址','err');return}
   // 檢查是否已在執行
-  try{const st=await(await fetch('/api/status')).json();if(st.running){showToast('已有處理正在執行中，請先停止再重新啟動','err');return}}catch(e){}
+  try{const st=await(await fetch('/api/status',{headers:_authHeaders()})).json();if(st.running){showToast('已有處理正在執行中，請先停止再重新啟動','err');return}}catch(e){}
   curCfg={mode,modeLabel:_modeLabels[mode]||mode,model:cselVal($('iModel')),engine:eng,asrLoc,isFile,record:$('iRec').checked,denoise:$('iDenoise').checked,mic:$('iMic').checked,diarize:isFile&&$('iDiarize').checked,summarize:isFile&&$('iSummarize').checked};
   $('goBtn').disabled=true;$('goBtn').textContent='啟動中...';
   try{const b={mode,model:cselVal($('iModel')),scene:cselVal($('iScene')),engine:cselVal($('iEngine')),llm_model:cselVal($('iLlmModel')),llm_host:$('iLlmHost').value,topic:$('iTopic').value,record:$('iRec').checked,mic:$('iMic').checked,denoise:$('iDenoise').checked,local_asr:cselVal($('iAsrLoc'))==='local',device:cselVal($('iDevice'))||null};
   if(isFile&&_selectedFiles.length){b.input_files=_selectedFiles;if($('iDiarize').checked){b.diarize=true;const ns=parseInt($('iNumSpk').value)||0;if(ns>0)b.num_speakers=ns}if($('iSummarize').checked){b.summarize=true;const sm=cselVal($('iSumModel'));if(sm)b.summary_model=sm}}
-  const r=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const d=await r.json();
+  const r=await fetch('/api/start',{method:'POST',headers:_authHeaders(),body:JSON.stringify(b)});const d=await r.json();
   if(d.status==='started'){_lastStartBody=JSON.parse(JSON.stringify(b));_curDeviceId=b.device;showLive();$('hMode').textContent=curCfg.modeLabel}}catch(e){showToast('啟動失敗: '+e.message,'err')}
   $('goBtn').disabled=false;$('goBtn').textContent='開始';
 }
 let _stopConfirm=false;
 async function stop(){
   if(!_stopConfirm){_stopConfirm=true;$('stopBtn').innerHTML='確認停止? <kbd>S</kbd>';$('stopBtn').style.background='#b71c1c';setTimeout(()=>{if(_stopConfirm){_stopConfirm=false;$('stopBtn').innerHTML='停止 <kbd>S</kbd>';$('stopBtn').style.background=''}},3000);return}
-  _stopConfirm=false;flash('停止',async()=>{const b=$('stopBtn');b.disabled=true;b.textContent='停止中...';await fetch('/api/stop',{method:'POST'})})
+  _stopConfirm=false;flash('停止',async()=>{const b=$('stopBtn');b.disabled=true;b.textContent='停止中...';await fetch('/api/stop',{method:'POST',headers:_authHeaders()})})
 }
 let _paused=false;
 function togglePause(){const next=!_paused;flash(next?'暫停':'繼續',()=>{_paused=next;$('pauseBtn').innerHTML=_paused?'繼續 <kbd>P</kbd>':'暫停 <kbd>P</kbd>';$('pauseBtn').style.background=_paused?'var(--green)':'var(--orange)';if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({action:_paused?'pause':'resume'}))})}
@@ -463,9 +493,10 @@ function toggleSubMode(){const entering=!$('pLive').classList.contains('sub-mode
 function showLive(){$('pSetup').style.display='none';$('pLive').classList.add('on');document.body.classList.add('has-live');
   const isBidi=['en_zh','ja_zh'].includes(curCfg.mode);$('pLive').classList.toggle('bidi',isBidi);
   msgsEl.innerHTML='';cnt=0;_discShown=false;$('hCount').textContent='';$('sCount').textContent='0 句';
-  $('hMode').textContent=curCfg.modeLabel;$('sMode').textContent=curCfg.modeLabel;$('sModel').textContent=curCfg.asrLoc+' '+curCfg.model;
+  $('hMode').textContent=curCfg.modeLabel||curCfg.mode;$('sMode').textContent=curCfg.modeLabel||curCfg.mode;
+  $('sModel').textContent=(curCfg.model?(curCfg.asrLoc+' '+curCfg.model):'');
   const hasEng=curCfg.engine&&!['en','zh','ja','record'].includes(curCfg.mode);
-  const _eLbl=hasEng?(curCfg.engine==='llm'?'LLM '+cselVal($('iLlmModel')):'本機 '+curCfg.engine.toUpperCase()):'';
+  const _eLbl=hasEng?(curCfg.engine==='llm'?'LLM '+(cselVal($('iLlmModel'))||''):'本機 '+curCfg.engine.toUpperCase()):'';
   $('sEngine').textContent=_eLbl;$('bTrans').style.display=hasEng?'inline-flex':'none';
   $('bRec').style.display=curCfg.record?'inline-flex':'none';$('bDenoise').style.display=curCfg.denoise?'inline-flex':'none';$('bMic').style.display=curCfg.mic?'inline-flex':'none';
   $('bDiarize').style.display=curCfg.diarize?'inline-flex':'none';$('bSummarize').style.display=curCfg.summarize?'inline-flex':'none';
@@ -476,13 +507,17 @@ function showLive(){$('pSetup').style.display='none';$('pLive').classList.add('o
   if(_autoMic)_dvh+='<span class="dev-badge-wrap"><span class="sbadge dev-badge" id="devMicBadge" onclick="showDevPopup(this,\'mic\')" title="點按靜音/恢復" style="background:rgba(25,135,84,.1);color:var(--green);cursor:pointer"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.5"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10V11C5 14.9 8.1 18 12 18S19 14.9 19 11V10" stroke-linecap="round"/></svg> <span class="dev-name">'+_autoMic+'</span></span></span>';
   }
   $('bDevices').innerHTML=_dvh;
+  // 沒勾轉錄麥克風時，麥克風膠囊 disable
+  if(!curCfg.mic&&$('devMicBadge')){const mb=$('devMicBadge');mb.style.opacity='.35';mb.style.cursor='default';mb.onclick=null}
   $('pauseBtn').style.display=curCfg.isFile?'none':'';
+  // 唯讀模式隱藏控制按鈕
+  if(_authRole==='read'){$('stopBtn').style.display='none';$('pauseBtn').style.display='none';$('bDevices').innerHTML=''}
   startTimer();const b=$('stopBtn');b.disabled=false;b.innerHTML='停止 <kbd>S</kbd>'}
 async function tryBackToSetup(){
-  try{const r=await fetch('/api/status',{signal:AbortSignal.timeout(2000)});if(r.ok){showSetup();return}}catch(e){}
+  try{const r=await fetch('/api/status',{headers:_authHeaders(),signal:AbortSignal.timeout(2000)});if(r.ok){showSetup();return}}catch(e){}
   showToast('WebUI 伺服器已離線，請重新執行 ./start.sh --webui','err');
 }
-function showSetup(){$('pSetup').style.display='flex';$('pLive').classList.remove('on');document.body.classList.remove('has-live');dot.classList.remove('on');$('hMode').textContent='--';$('hCount').textContent='';stopTimer()}
+function showSetup(){if(_authRole==='read'){$('pLive').classList.remove('on');document.body.classList.remove('has-live');$('cfgLoading').innerHTML='<div style="text-align:center;color:var(--text-dim);font-size:14px;line-height:2">唯讀模式<br>等待主機開始辨識...</div>';$('cfgLoading').style.display='';return}$('pSetup').style.display='flex';$('pLive').classList.remove('on');document.body.classList.remove('has-live');dot.classList.remove('on');$('hMode').textContent='--';$('hCount').textContent='';stopTimer()}
 function showDisconnected(msg){
   stopTimer();dot.classList.remove('on');const d=document.createElement('div');d.className='disc-msg';
   let h='<div class="disc-title">'+esc(msg)+'</div>';
@@ -512,20 +547,65 @@ function _renderMsg(ev){dot.classList.add('on');cnt++;$('hCount').textContent=cn
   if($('pLive').classList.contains('sub-mode'))_subModeLimit();
   if(aScr)requestAnimationFrame(()=>{msgsEl.scrollTop=msgsEl.scrollHeight})}
 /* WS */
-function conn(){const p=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(p+'//'+location.host+'/ws');ws.onopen=()=>{if(rTimer){clearInterval(rTimer);rTimer=null}};
+function conn(){const p=location.protocol==='https:'?'wss:':'ws:';const _wsUrl=p+'//'+location.host+'/ws'+(_authToken?'?token='+encodeURIComponent(_authToken):'');ws=new WebSocket(_wsUrl);ws.onopen=()=>{if(rTimer){clearInterval(rTimer);rTimer=null}};
   ws.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type==='transcription')addMsg(ev);else if(ev.type==='started'){curCfg.modeLabel=_modeLabels[ev.mode]||ev.mode;curCfg.mode=ev.mode;if(!_isSwitching){showLive()}dot.classList.add('on')}else if(ev.type==='stopped'&&!_isSwitching)showSetup();else if(ev.type==='disconnected'){if(_isSwitching)return;dot.classList.remove('on');showDisconnected(ev.message||'主程式已結束')}else if(ev.type==='switching'){$('bInfo').textContent=ev.message||'切換中...'}else if(ev.type==='rms'&&ev.value!=null)pushVol(ev.value);else if(ev.type==='progress'){$('bInfo').textContent=ev.stage+(ev.detail?' — '+ev.detail:'')}}catch(x){}};
   ws.onclose=()=>{dot.classList.remove('on');if($('pLive').classList.contains('on')&&!_discShown){_discShown=true;showDisconnected('與伺服器的連線已中斷')}if(!rTimer)rTimer=setInterval(()=>{if(!ws||ws.readyState===WebSocket.CLOSED)conn()},3000)};ws.onerror=()=>ws.close()}
 // Tooltips
 const _tips={iSource:'選擇即時擷取系統音訊，或讀入音訊檔案進行離線處理',iMode:'選擇翻譯方向或轉錄語言。雙向模式需使用耳機',iAsrLoc:'GPU 伺服器辨識速度快；本機不需網路但較慢',iModel:'較大的模型準確度較高但速度較慢',iScene:'緩衝長度越長句子越完整，越短反應越即時',iEngine:'LLM 品質最好需伺服器，NLLB/Argos 為本機離線',iLlmHost:'Ollama 或 OpenAI 相容伺服器的 IP:Port',iLlmModel:'選擇 LLM 伺服器上的翻譯模型',testBtn:'測試 LLM 伺服器連線並載入可用模型清單',iDevice:'擷取電腦播放的聲音（BlackHole / WASAPI Loopback）',iMicDev:'擷取本機麥克風或耳機的輸入',iTopic:'填寫會議主題可提升翻譯的上下文準確度',iRec:'同時將音訊錄製為檔案，儲存於 recordings/ 目錄',iMic:'同時轉錄麥克風輸入（ASR 負載加倍）',iDenoise:'啟用背景降噪（適合嘈雜環境，安靜環境可不勾）',goBtn:'啟動即時辨識或離線處理',stopBtn:'停止目前的辨識工作（按兩次確認）',pauseBtn:'暫停或繼續辨識（快捷鍵 P）',subBtn:'切換對話模式與字幕模式（快捷鍵 T）'};
 Object.entries(_tips).forEach(([id,tip])=>{const el=$(id);if(el)el.title=tip});
-loadCfg();conn();
+let _authToken='',_authRole='admin';
+function _authHeaders(){return _authToken?{'Content-Type':'application/json','X-Auth-Token':_authToken}:{'Content-Type':'application/json'}}
+function _showAuthDialog(title,hint,showSkip){
+  return new Promise(resolve=>{
+    const ov=document.createElement('div');ov.className='auth-overlay';
+    ov.innerHTML='<div class="auth-box"><h3>'+esc(title)+'</h3><p>'+hint+'</p><input type="password" id="_authInput" placeholder="請輸入密碼" autofocus><div class="auth-btns"><button class="auth-ok" id="_authOk">確定</button>'+(showSkip?'<button class="auth-skip" id="_authSkip">唯讀模式</button>':'')+'</div><div class="auth-err" id="_authErr"></div></div>';
+    document.body.appendChild(ov);
+    const inp=document.getElementById('_authInput');
+    const ok=document.getElementById('_authOk');
+    const skip=document.getElementById('_authSkip');
+    const done=(v)=>{ov.remove();resolve(v)};
+    ok.onclick=()=>done(inp.value);
+    inp.onkeydown=e=>{if(e.key==='Enter')done(inp.value)};
+    if(skip)skip.onclick=()=>done('');
+    setTimeout(()=>inp.focus(),100);
+  });
+}
+function togglePwVis(id,btn){const inp=$(id);if(inp.type==='password'){inp.type='text';btn.textContent='隱藏'}else{inp.type='password';btn.textContent='顯示'}}
+async function savePw(){
+  const r=$('iPwRead').value.trim(),a=$('iPwAdmin').value.trim();
+  try{const res=await fetch('/api/save-passwords',{method:'POST',headers:_authHeaders(),body:JSON.stringify({read:r,admin:a})});const d=await res.json();$('pwResult').innerHTML=d.ok?'<span style="color:var(--green)">已儲存</span>':'<span style="color:var(--red)">'+esc(d.error)+'</span>'}catch(e){$('pwResult').innerHTML='<span style="color:var(--red)">'+esc(e.message)+'</span>'}
+}
+async function _tryAuth(){
+  try{
+    // 先嘗試無密碼
+    let r=await fetch('/api/config');
+    if(r.ok){
+      const c=await r.json();
+      if(c.is_local){_authRole='admin';return true}
+      // 遠端無唯讀密碼，直接 read-only
+      _authRole='read';return true;
+    }
+    // 需要密碼 — 只問一次，自動判斷角色
+    const pw=await _showAuthDialog('需要密碼','請輸入密碼以存取。<br>輸入管理密碼可操作控制項目，輸入觀看密碼可觀看字幕。',false);
+    if(!pw)return false;
+    _authToken=pw;
+    // 驗證角色
+    const ar=await fetch('/api/auth',{method:'POST',headers:_authHeaders(),body:JSON.stringify({password:pw})});
+    const ad=await ar.json();
+    if(ad.role==='denied'){showToast('密碼錯誤','err');_authToken='';return false}
+    _authRole=ad.role;
+    return true;
+  }catch(e){}
+  return true;
+}
+(async()=>{if(await _tryAuth()){loadCfg();conn()}else{document.body.innerHTML='<div style="text-align:center;padding:60px;color:#666">存取被拒絕</div>'}})();
 // 裝置 popup（靜音 + 切換裝置）
 function _closeDevPopup(){document.querySelectorAll('.dev-popup').forEach(p=>p.remove())}
 document.addEventListener('click',e=>{if(!e.target.closest('.dev-popup')&&!e.target.closest('.dev-badge'))_closeDevPopup()});
 async function showDevPopup(badgeEl,type){
   _closeDevPopup();if(_isSwitching)return;
   // 刷新裝置清單
-  try{const r=await fetch('/api/config');const c=await r.json();_allDevices=c.devices||[]}catch(e){}
+  try{const r=await fetch('/api/config',{headers:_authHeaders()});const c=await r.json();_allDevices=c.devices||[]}catch(e){}
   const wrap=badgeEl.closest('.dev-badge-wrap')||badgeEl.parentElement;
   const pop=document.createElement('div');pop.className='dev-popup';pop.onclick=e=>e.stopPropagation();
   const isLb=type==='lb';const label=isLb?'系統音訊裝置':'麥克風裝置';
@@ -567,7 +647,7 @@ async function switchDevice(type,deviceId,deviceName){
   const label=isLb?'系統音訊':'麥克風';
   if(badge){badge.classList.add('switching');const nm=badge.querySelector('.dev-name');if(nm)nm.textContent='切換中...'}
   try{
-    const r=await fetch('/api/switch-device',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({start_body:_lastStartBody,device_type:type,device_id:deviceId})});
+    const r=await fetch('/api/switch-device',{method:'POST',headers:_authHeaders(),body:JSON.stringify({start_body:_lastStartBody,device_type:type,device_id:deviceId})});
     const d=await r.json();
     if(d.ok){
       if(isLb){_lastStartBody.device=deviceId;_curDeviceId=deviceId;_autoLb=deviceName}

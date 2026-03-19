@@ -1,4 +1,4 @@
-# jt-live-whisper v2.14.3
+# jt-live-whisper v2.14.4
 
 **100% 全地端 AI 語音工具集**：即時轉錄、即時翻譯、錄音檔批次處理、講者辨識、會議摘要，所有 AI 模型皆在自有設備上執行，資料不經過任何雲端服務。
 
@@ -544,15 +544,20 @@ cd C:\jt-live-whisper
 
 ```
 jt-live-whisper/
-  translate_meeting.py     主程式（跨平台）
+  translate_meeting.py     主程式（即時辨識、離線處理、翻譯、摘要，跨平台）
+  webui.py                 WebUI 伺服器（FastAPI + WebSocket，瀏覽器介面後端）
+  webui.html               WebUI 前端（單一 HTML，內嵌 CSS/JS）
   start.sh                 啟動腳本（macOS）
   start.ps1                啟動腳本（Windows）
   install.sh               安裝腳本（macOS）
   install.ps1              安裝腳本（Windows）
-  config.json              使用者設定（自動產生）
-  logs/                    轉錄記錄檔、AI 摘要檔（自動建立）
+  remote_whisper_server.py GPU 伺服器端 Whisper 辨識服務（選配）
+  config.json              使用者設定（自動產生，含 LLM/GPU/WebUI 密碼等）
+  SOP.md                   完整使用手冊
+  CHANGELOG.md             版本更新記錄
+  logs/                    轉錄記錄檔、AI 摘要檔、HTML 逐字稿（自動建立）
   recordings/              暫存音訊轉檔（自動建立）
-  whisper.cpp/             Whisper AI 引擎（macOS 自動編譯，Windows 下載預編譯版本）
+  whisper.cpp/             whisper.cpp 即時辨識引擎（macOS 自動編譯，Windows 下載預編譯版本）
   venv/                    Python 虛擬環境（安裝時自動建立）
 ```
 
@@ -579,6 +584,14 @@ jt-live-whisper/
       → 本地端 faster-whisper AI 語音辨識
         → （選配）講者辨識
           → 本地端 LLM / NLLB / Argos 翻譯 + AI 摘要
+
+WebUI 瀏覽器介面（./start.sh --webui）：
+  webui.py（FastAPI + WebSocket）
+    → 瀏覽器設定頁（所有功能皆可操作）
+    → 啟動 translate_meeting.py 子程序
+    → TCP localhost:19780 接收即時事件
+    → WebSocket 推送到瀏覽器（即時字幕、進度、狀態）
+    → 支援遠端觀看（密碼保護）、手機/平板
 ```
 
 &nbsp;

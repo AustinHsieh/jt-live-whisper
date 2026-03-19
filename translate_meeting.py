@@ -713,7 +713,7 @@ ASR_ENGINES = [
     ("moonshine", "Moonshine", "真串流，低延遲，僅英文"),
 ]
 
-APP_VERSION = "2.14.3"
+APP_VERSION = "2.14.4"
 
 # ─── WebUI 暫停控制（SIGUSR1 toggle）──────────────────────────────
 _webui_pause_event = None  # 由各 streaming 函式設定
@@ -3793,6 +3793,7 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
             print(f"\n  {C_OK}✓ 錄音已儲存: {rec_path}{RESET}", flush=True)
             print(f"  {C_DIM}提示: 可再次執行本程式，選擇「讀入檔案」匯入錄音檔，產生逐字稿校正與 AI 摘要{RESET}", flush=True)
         print(f"\n{C_DIM}正在停止...{RESET}", flush=True)
+        _webui_send({"type": "progress", "stage": "正在停止", "detail": ""})
         proc.terminate()
         try:
             proc.wait(timeout=3)
@@ -3992,6 +3993,10 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
                             timestamp = time.strftime("%H:%M:%S")
                             with open(log_path, "a", encoding="utf-8") as log_f:
                                 log_f.write(f"[{timestamp}] [EN] {line}\n\n")
+                            _webui_send({"type": "transcription", "source": "main",
+                                         "src_lang": "EN", "src_text": line,
+                                         "asr_time": round(_asr_elapsed, 1),
+                                         "timestamp": timestamp})
                         else:
                             # 英翻中：原文延後到翻譯完成時一起顯示
                             last_translated = line
@@ -4020,6 +4025,10 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
                             timestamp = time.strftime("%H:%M:%S")
                             with open(log_path, "a", encoding="utf-8") as log_f:
                                 log_f.write(f"[{timestamp}] [{_src_l}] {line}\n\n")
+                            _webui_send({"type": "transcription", "source": "main",
+                                         "src_lang": _src_l, "src_text": line,
+                                         "asr_time": round(_asr_elapsed, 1),
+                                         "timestamp": timestamp})
                         else:
                             # ja2zh：原文延後到翻譯完成時一起顯示
                             last_translated = line
@@ -4083,6 +4092,10 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
                         timestamp = time.strftime("%H:%M:%S")
                         with open(log_path, "a", encoding="utf-8") as log_f:
                             log_f.write(f"[{timestamp}] [中] {line}\n\n")
+                        _webui_send({"type": "transcription", "source": "main",
+                                     "src_lang": "中", "src_text": line,
+                                     "asr_time": round(_asr_elapsed, 1),
+                                     "timestamp": timestamp})
 
             time.sleep(0.1)
 
@@ -4317,6 +4330,10 @@ def run_stream_moonshine(capture_id: int, translator, moonshine_model_name: str,
                     timestamp = time.strftime("%H:%M:%S")
                     with open(log_path, "a", encoding="utf-8") as log_f:
                         log_f.write(f"[{timestamp}] [EN] {text}\n\n")
+                    _webui_send({"type": "transcription", "source": "main",
+                                 "src_lang": "EN", "src_text": text,
+                                 "asr_time": round(asr_elapsed, 1),
+                                 "timestamp": timestamp})
                 else:
                     # en2zh：原文延後到翻譯完成時一起顯示
                     with print_lock:
@@ -4495,6 +4512,7 @@ def run_stream_moonshine(capture_id: int, translator, moonshine_model_name: str,
         restore_terminal()
         _cleanup_moonshine()
         print(f"\n{C_DIM}正在停止...{RESET}", flush=True)
+        _webui_send({"type": "progress", "stage": "正在停止", "detail": ""})
         _force_exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -5001,6 +5019,7 @@ def run_stream_remote(capture_id: int, translator, model_name: str,
         restore_terminal()
         _cleanup_remote()
         print(f"\n{C_DIM}正在停止...{RESET}", flush=True)
+        _webui_send({"type": "progress", "stage": "正在停止", "detail": ""})
         _force_exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -5590,6 +5609,7 @@ def run_stream_local_whisper(capture_id: int, translator, model_name: str,
         restore_terminal()
         _cleanup_local()
         print(f"\n{C_DIM}正在停止...{RESET}", flush=True)
+        _webui_send({"type": "progress", "stage": "正在停止", "detail": ""})
         _force_exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -6711,6 +6731,7 @@ def run_stream_bidirectional(lb_device_id, mic_device_id,
         restore_terminal()
         _cleanup_bidi()
         print(f"\n{C_DIM}正在停止...{RESET}", flush=True)
+        _webui_send({"type": "progress", "stage": "正在停止", "detail": ""})
         # 一律用 os._exit() 避免 atexit/thread 清理造成卡住
         _force_exit(0)
 
@@ -7070,6 +7091,7 @@ class _AudioRecorder:
             spin_idx = 0
             start_t = time.monotonic()
             timeout_s = 300
+            _webui_send({"type": "progress", "stage": "存檔中", "detail": f"錄音轉檔 WAV → {fmt_upper}"})
             while not ffmpeg_done.is_set():
                 pct = progress_pct[0]
                 ch = spinner_chars[spin_idx % len(spinner_chars)]
@@ -7096,8 +7118,10 @@ class _AudioRecorder:
                 except OSError:
                     out_str = ""
                 print(f"{C_OK}✓ WAV → {fmt_upper} 轉檔完成{out_str}{RESET}")
+                _webui_send({"type": "progress", "stage": "存檔完成", "detail": f"{fmt_upper} {out_str}"})
             else:
                 print(f"{C_WARN}[警告] 錄音轉 {fmt} 失敗（保留 WAV）{RESET}")
+                _webui_send({"type": "progress", "stage": "存檔", "detail": f"轉檔失敗，保留 WAV"})
         except Exception:
             # 清除可能殘留的 spinner
             sys.stdout.write("\r\x1b[2K")
@@ -8605,12 +8629,22 @@ def _is_en_hallucination(text):
     if len(stripped_alpha) < 3:
         return True
     line_lower = text.lower().strip(".")
-    return line_lower in (
+    if line_lower in (
         "you", "the", "bye", "so", "okay",
         "thank you", "thanks for watching",
         "thanks for listening", "see you next time",
         "subscribe", "like and subscribe",
-    )
+        "don't forget to subscribe", "please subscribe",
+        "please subscribe to my channel",
+    ):
+        return True
+    # 關鍵字比對（Amara / 字幕歸屬 / 版權幻覺）
+    return any(kw in line_lower for kw in (
+        "amara.org", "otter.ai", "rev.com", "transcribed by",
+        "subtitles by", "translated by", "captions by",
+        "pomp and circumstance", "sir edward elgar",
+        "© bf-watch", "© transcript",
+    ))
 
 
 def _is_zh_hallucination(text):
@@ -8635,14 +8669,36 @@ def _is_zh_hallucination(text):
         return True
     # 簡體+繁體關鍵字都要檢查（faster-whisper 可能輸出簡體）
     return any(kw in text for kw in (
-        "訂閱", "订阅", "點贊", "点赞", "點讚", "轉發", "转发", "打賞", "打赏",
+        # YouTube 用語
+        "訂閱", "订阅", "歡迎訂閱", "欢迎订阅",
+        "點贊", "点赞", "點讚", "按讚", "轉發", "转发", "打賞", "打赏",
         "感謝觀看", "感谢观看", "謝謝大家", "谢谢大家", "謝謝收看", "谢谢收看",
+        "感謝收聽", "感谢收听", "感謝聆聽", "感谢聆听",
+        "喜歡的話", "喜欢的话", "別忘了", "别忘了",
+        # 字幕/翻譯歸屬（Amara.org 訓練資料殘留）
         "字幕由", "字幕提供", "字幕志願", "字幕志愿", "字幕組", "字幕组",
+        "字幕視聽", "字幕视听", "字幕製作", "字幕制作",
         "翻譯志願", "翻译志愿", "校對志願", "校对志愿",
+        "Amara", "amara",
+        # 版權歸屬幻覺（僅短句時過濾，長句可能是真實討論）
+        "版權所有", "版权所有",
+        "初音ミク", "初音",
+        # 頻道/節目
         "獨播", "独播", "劇場", "剧场", "YoYo", "Television Series",
-        "歡迎訂閱", "欢迎订阅", "明鏡", "明镜", "新聞頻道", "新闻频道",
-        "初音ミク", "初音", "作曲・編曲", "作曲/編曲",
+        "明鏡", "明镜", "新聞頻道", "新闻频道",
+        "直播間", "直播间", "觀眾朋友", "观众朋友",
     ))
+    # 短句限定：音樂/版權歸屬幻覺（長句中出現這些詞可能是真實討論，不過濾）
+    if len(_stripped) <= 10:
+        return any(kw in text for kw in (
+            "詞曲", "词曲", "作詞", "作词", "作曲", "編曲", "编曲",
+            "詞：", "词：", "曲：", "演唱", "原唱",
+            "版權", "版权", "著作權", "著作权",
+            "李宗盛", "周杰倫", "周杰伦", "林俊傑", "林俊杰", "蔡依林",
+            "張惠妹", "张惠妹", "五月天", "陳奕迅", "陈奕迅",
+            "鄧紫棋", "邓紫棋", "王力宏",
+        ))
+    return False
 
 
 def _is_ja_hallucination(text):
@@ -8654,6 +8710,8 @@ def _is_ja_hallucination(text):
     return any(kw in text for kw in (
         "チャンネル登録", "高評価", "ご視聴", "コメント欄",
         "ご覧いただき", "ありがとうございました",
+        "字幕提供", "字幕制作", "翻訳者",
+        "Amara", "amara",
     ))
 
 
