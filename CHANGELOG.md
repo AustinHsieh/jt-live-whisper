@@ -1,11 +1,32 @@
 # Changelog
 
-### v2.14.7 (2026-03-20)
+### v2.14.8 (2026-03-20)
+
+**新功能**
+- 純轉錄模式（英文/中文/日文）支援 LLM 自動校正逐字稿：有設定 LLM 伺服器時自動啟用，修正 ASR 辨識錯字
+- 離線處理摘要選項新增「只校正逐字稿（不產出摘要）」，可獨立使用 LLM 校正功能
+- CLI 模式純轉錄自動偵測 LLM：有 config.json LLM 設定即自動連線校正，無需額外參數
+- WebUI 離線處理完成時顯示產出檔案連結（膠囊按鈕，分類標籤：摘要/逐字/字幕），可直接點擊開啟
+- WebUI 離線處理完成新增「開啟資料夾」按鈕，直接在 Finder / Explorer 開啟 session 目錄
+- webui.py 新增 `/logs/` 靜態檔案服務 + `/api/open-folder` API
+- 離線處理新增 VTT (WebVTT) 字幕檔輸出（與 SRT 同時產出）
+- 時間逐字稿 / 摘要 HTML footer 新增 VTT 字幕連結
+- LLM 校正逐字稿串流即時推送：校正結果逐行送到 WebUI 即時顯示
+- WebUI 設定頁 ↔ 字幕頁加入滑動淡入淡出轉場動畫
+
+**改進**
+- WebUI「離線處理選項」標題精簡為「離線處理」（統一四字）
+- WebUI「摘要模型」標籤改為「摘要 / 校正模型」
+- WebUI 底部控制列 `.bar>div` 加 `display:flex; align-items:center` 修正垂直置中
+- 摘要 prompt 明確要求校正逐字稿分段（每段 3-8 句，話題轉換換段）
+- 摘要 HTML 渲染加 fallback：超過 500 字的段落自動每 5 句分段
 
 **修正**
 - install.ps1 whisper.cpp 編譯：非 CUDA 模式明確設定 `-DGGML_CUDA=OFF`（避免 cmake 自動偵測 nvcc 導致失敗）
 - install.ps1 whisper.cpp CUDA 編譯失敗自動降級 CPU：擴大偵測範圍（含 cmake 自動偵測 CUDA 的失敗情境）
 - install.ps1 CUDA Toolkit 偵測改用 nvcc.exe 驗證（不再僅檢查目錄存在）
+- LLM 校正逐字稿翻譯配對保護：原文 [EN] 行有配對譯文時不被誤刪為雜音
+- WebUI 離線處理完成時清空底部狀態列（停止 spinner 旋轉）
 
 ### v2.14.6 (2026-03-20)
 

@@ -22,7 +22,8 @@ from pathlib import Path
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+    from fastapi.staticfiles import StaticFiles
     import uvicorn
 except ImportError:
     print("[錯誤] 需要安裝 fastapi 和 uvicorn：")
@@ -100,6 +101,11 @@ async def lifespan(app):
 
 
 app = FastAPI(title="jt-live-whisper WebUI", lifespan=lifespan)
+
+# ─── 靜態檔案服務（logs/ 子目錄，供 WebUI 開啟逐字稿/摘要 HTML）───
+_logs_dir = BASE_DIR / "logs"
+if _logs_dir.is_dir():
+    app.mount("/logs", StaticFiles(directory=str(_logs_dir)), name="logs")
 
 # ─── WebSocket 連線管理 ──────────────────────────────────────
 connected_clients: list[WebSocket] = []
@@ -370,7 +376,7 @@ def _get_config():
         "gpu_host": gpu_host, "summary_descs": summary_descs,
         "recommended_models": recommended_models,
         "default_engine": "llm" if llm_host else "nllb",
-        "last": last, "version": "2.14.7",
+        "last": last, "version": "2.14.8",
         "has_read_pw": bool(_webui_passwords["read"]),
         "has_admin_pw": bool(_webui_passwords["admin"]),
     }
@@ -431,6 +437,31 @@ async def api_save_passwords(request: Request, body: dict = {}):
         CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), encoding="utf-8")
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
+    return {"ok": True}
+
+
+@app.post("/api/open-folder")
+async def api_open_folder(request: Request):
+    """開啟指定資料夾（僅限本機）"""
+    if not _is_local(request):
+        return JSONResponse({"ok": False, "error": "僅限本機操作"}, status_code=403)
+    body = await request.json()
+    folder = body.get("path", "")
+    if not folder:
+        return JSONResponse({"ok": False, "error": "未指定路徑"})
+    full = (BASE_DIR / folder).resolve()
+    # 安全檢查：必須在專案目錄下
+    if not str(full).startswith(str(BASE_DIR.resolve())):
+        return JSONResponse({"ok": False, "error": "路徑不合法"})
+    if not full.is_dir():
+        return JSONResponse({"ok": False, "error": "資料夾不存在"})
+    import platform
+    if platform.system() == "Darwin":
+        subprocess.Popen(["open", str(full)])
+    elif platform.system() == "Windows":
+        subprocess.Popen(["explorer", str(full)])
+    else:
+        subprocess.Popen(["xdg-open", str(full)])
     return {"ok": True}
 
 

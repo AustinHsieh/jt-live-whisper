@@ -713,7 +713,7 @@ ASR_ENGINES = [
     ("moonshine", "Moonshine", "真串流，低延遲，僅英文"),
 ]
 
-APP_VERSION = "2.14.7"
+APP_VERSION = "2.14.8"
 
 # ─── WebUI 暫停控制（SIGUSR1 toggle）──────────────────────────────
 _webui_pause_event = None  # 由各 streaming 函式設定
@@ -842,7 +842,7 @@ SUMMARY_PROMPT_TEMPLATE = """\
 你是專業的會議記錄整理員。請根據以下即時轉錄的逐字稿，完成兩件事：
 
 1. **重點摘要**：列出 5-10 個重點，每個重點用一句話概述。
-2. **校正逐字稿**：將零碎的語音辨識結果整理成流暢、易讀的段落文字。合併斷句、修正錯字，保留原始語意，不要增刪內容。不需要保留時間戳記。**必須完整輸出所有內容，嚴禁以「以下略」「篇幅限制」「內容省略」等理由截斷或跳過任何段落。**
+2. **校正逐字稿**：將零碎的語音辨識結果整理成流暢、易讀的段落文字。合併斷句、修正錯字，保留原始語意，不要增刪內容。不需要保留時間戳記。**必須完整輸出所有內容，嚴禁以「以下略」「篇幅限制」「內容省略」等理由截斷或跳過任何段落。** 話題轉換時必須換段（空一行），每段約 3-8 句，嚴禁整篇輸出成一個段落。
 
 輸出格式：
 
@@ -854,7 +854,7 @@ SUMMARY_PROMPT_TEMPLATE = """\
 
 ## 校正逐字稿
 
-（整理成流暢段落的純文字逐字稿，不要使用 markdown 格式，不要逐行列出，要合併成自然的段落）
+（整理成流暢段落的純文字逐字稿，不要使用 markdown 格式，不要逐行列出，要合併成自然的段落。話題轉換時換段，每段空一行分隔）
 
 規則：
 - 逐字稿中 [EN] 標記的是英文原文語音辨識結果，[中] 標記的是中文翻譯。校正時請以中文翻譯為主，參考英文原文修正翻譯錯誤
@@ -875,7 +875,7 @@ SUMMARY_PROMPT_DIARIZE_TEMPLATE = """\
 你是專業的會議記錄整理員。請根據以下含有講者標記的逐字稿，完成兩件事：
 
 1. **重點摘要**：列出 5-10 個重點，每個重點用一句話概述。
-2. **校正逐字稿**：將零碎的語音辨識結果整理成流暢、易讀的對話文字。合併同一位講者的連續斷句、修正錯字，保留原始語意，不要增刪內容。不需要保留時間戳記。**必須完整輸出所有內容，嚴禁以「以下略」「篇幅限制」「內容省略」等理由截斷或跳過任何段落。**
+2. **校正逐字稿**：將零碎的語音辨識結果整理成流暢、易讀的對話文字。合併同一位講者的連續斷句、修正錯字，保留原始語意，不要增刪內容。不需要保留時間戳記。**必須完整輸出所有內容，嚴禁以「以下略」「篇幅限制」「內容省略」等理由截斷或跳過任何段落。** 每位講者的每段發言約 3-8 句，過長時分成多段（每段都要標注 Speaker N）。
 
 輸出格式：
 
@@ -941,7 +941,7 @@ SUMMARY_MERGE_PROMPT_TEMPLATE = """\
 
 def _summary_prompt(transcript, topic=None, summary_mode="both"):
     """依據逐字稿內容選擇摘要 prompt（有 Speaker 標籤用對話版）
-    summary_mode: "both"（摘要+逐字稿）、"summary"（只摘要）、"transcript"（只逐字稿）
+    summary_mode: "both"（摘要+逐字稿）、"summary"（只摘要）、"correct_only"（只校正）、"transcript"（純 ASR）
     """
     if "[Speaker " in transcript:
         prompt = SUMMARY_PROMPT_DIARIZE_TEMPLATE.format(transcript=transcript)
@@ -2064,9 +2064,11 @@ def _live_output_line(line, write_lock):
 
 
 def _llm_generate(prompt, model, host, port, server_type, stream=False,
-                  timeout=30, spinner=None, live_output=False, think=None):
+                  timeout=30, spinner=None, live_output=False, think=None,
+                  on_line=None):
     """統一 LLM 生成介面，支援 Ollama 原生 API 和 OpenAI 相容 API
-    think: True=啟用思考模式, False=關閉思考模式, None=不指定（由模型預設）"""
+    think: True=啟用思考模式, False=關閉思考模式, None=不指定（由模型預設）
+    on_line: 串流模式下每收到完整一行時呼叫 on_line(line_text)"""
     write_lock = getattr(spinner, '_lock', None)
 
     if server_type == "openai":
@@ -2135,11 +2137,14 @@ def _llm_generate(prompt, model, host, port, server_type, stream=False,
                     token_count += 1
                     if spinner:
                         spinner.update_tokens(token_count)
-                    if live_output:
+                    if live_output or on_line:
                         line_buf += token
                         while "\n" in line_buf:
                             out_line, line_buf = line_buf.split("\n", 1)
-                            _live_output_line(out_line, write_lock)
+                            if live_output:
+                                _live_output_line(out_line, write_lock)
+                            if on_line:
+                                on_line(out_line)
                 # 檢查 finish_reason
                 if choices[0].get("finish_reason"):
                     break
@@ -2159,16 +2164,22 @@ def _llm_generate(prompt, model, host, port, server_type, stream=False,
                     token_count += 1
                     if spinner:
                         spinner.update_tokens(token_count)
-                    if live_output:
+                    if live_output or on_line:
                         line_buf += token
                         while "\n" in line_buf:
                             out_line, line_buf = line_buf.split("\n", 1)
-                            _live_output_line(out_line, write_lock)
+                            if live_output:
+                                _live_output_line(out_line, write_lock)
+                            if on_line:
+                                on_line(out_line)
                 if chunk.get("done", False):
                     break
     # 輸出殘餘緩衝
-    if live_output and line_buf.strip():
-        _live_output_line(line_buf, write_lock)
+    if line_buf.strip():
+        if live_output:
+            _live_output_line(line_buf, write_lock)
+        if on_line:
+            on_line(line_buf)
     return response_text.strip()
 
 
@@ -3401,7 +3412,7 @@ def _input_interactive_menu(args):
                 num_speakers = 2
 
         # ── 第五步：摘要 ──
-        # 非翻譯模式時，前面未偵測 LLM 伺服器，在此靜默偵測（摘要需要 LLM）
+        # 非翻譯模式時，前面未偵測 LLM 伺服器，在此靜默偵測（摘要/校正需要 LLM）
         if not need_translate and ollama_host and llm_server_type is None:
             llm_server_type, _ = _check_llm_server(ollama_host, ollama_port)
         _has_llm = llm_server_type is not None and ollama_host is not None
@@ -3409,8 +3420,9 @@ def _input_interactive_menu(args):
             default_summarize = 0
             summarize_options = [
                 ("產出摘要與校正逐字稿", "both"),
+                ("只校正逐字稿（不產出摘要）", "correct_only"),
                 ("只產出摘要", "summary"),
-                ("只產出逐字稿", "transcript"),
+                ("不校正、不摘要（純 ASR 輸出）", "transcript"),
             ]
 
             print(f"\n\n{C_TITLE}{BOLD}▎ 摘要與逐字稿校正{RESET}")
@@ -3443,9 +3455,10 @@ def _input_interactive_menu(args):
             do_summarize = True
             print(f"\n  {C_DIM}（未連線 LLM 伺服器，僅產出逐字稿；摘要與校正需要 LLM）{RESET}")
 
-        # 選了摘要 → 先確認 LLM 伺服器（若翻譯步驟未問過）→ 選摘要模型
+        # 選了摘要或校正 → 先確認 LLM 伺服器（若翻譯步驟未問過）→ 選摘要模型
         summary_model = SUMMARY_DEFAULT_MODEL
-        if do_summarize and summary_mode != "transcript":
+        _need_llm_for_output = do_summarize and summary_mode not in ("transcript",)
+        if _need_llm_for_output:
             if not ollama_asked:
                 default_addr = f"{ollama_host}:{ollama_port}"
                 print(f"\n\n{C_TITLE}{BOLD}▎ LLM 伺服器{RESET}")
@@ -3476,60 +3489,64 @@ def _input_interactive_menu(args):
                     print(f"{C_HIGHLIGHT}未偵測到 LLM 伺服器（{ollama_host}:{ollama_port}）{RESET}")
                     print(f"  {C_HIGHLIGHT}⚠ 摘要功能需要 LLM 伺服器，請確認伺服器已啟動{RESET}")
 
-            # 摘要模型：列出伺服器上所有模型
-            all_summary_models = _llm_list_models(ollama_host, ollama_port, llm_server_type or "ollama")
-            summary_models_list = []
-            for m_name in all_summary_models:
-                desc = next((d for n, d in SUMMARY_MODELS if n == m_name), "")
-                summary_models_list.append((m_name, desc))
-            if not summary_models_list:
-                summary_models_list = [(n, d) for n, d in SUMMARY_MODELS]
-
-            _last_summary = _config.get("last_summary_model")
-            default_sm = 0
-            for i, (name, _) in enumerate(summary_models_list):
-                if name == SUMMARY_DEFAULT_MODEL:
-                    default_sm = i
-                    break
-
-            def _dw_sm(s):
-                return sum(2 if '\u4e00' <= c <= '\u9fff' else 1 for c in s)
-
-            col = max(_dw_sm(name) for name, _ in summary_models_list) + 2
-            print(f"\n\n{C_TITLE}{BOLD}▎ 摘要模型{RESET}")
-            print(f"{C_DIM}{'─' * 60}{RESET}")
-            for i, (name, desc) in enumerate(summary_models_list):
-                padded = name + ' ' * (col - _dw_sm(name))
-                tags = []
-                if i == default_sm:
-                    tags.append(f"{C_HIGHLIGHT}{REVERSE} 預設 {RESET}")
-                if name == _last_summary:
-                    tags.append(f"{C_OK}{REVERSE} 前次使用 {RESET}")
-                tag_str = " ".join(tags)
-                if i == default_sm:
-                    print(f"  {C_HIGHLIGHT}{BOLD}[{i}] {padded}{RESET} {C_WHITE}{desc}{RESET}  {tag_str}")
-                else:
-                    print(f"  {C_DIM}[{i}]{RESET} {C_WHITE}{padded}{RESET} {C_DIM}{desc}{RESET}  {tag_str}")
-            # 檢查推薦摘要模型是否存在於伺服器
-            _rec_sm = {n for n, _ in _BUILTIN_SUMMARY_MODELS}
-            _avail_sm = {n for n, _ in summary_models_list}
-            if not _rec_sm & _avail_sm:
-                _rec_sm_list = " / ".join(n for n, _ in _BUILTIN_SUMMARY_MODELS)
-                print(f"  {C_HIGHLIGHT}注意：本 LLM 伺服器未安裝推薦摘要模型（{_rec_sm_list}），摘要品質可能不如預期{RESET}")
-            print(f"{C_DIM}{'─' * 60}{RESET}")
-            print(f"{C_WHITE}按 Enter 使用預設，或輸入編號：{RESET}", end=" ")
-
-            user_input = input().strip()
-            if user_input:
-                try:
-                    sm_idx = int(user_input)
-                    if not (0 <= sm_idx < len(summary_models_list)):
-                        sm_idx = default_sm
-                except ValueError:
-                    sm_idx = default_sm
+            if summary_mode == "correct_only":
+                # 校正用翻譯模型或預設摘要模型，不需選摘要模型
+                summary_model = ollama_model or SUMMARY_DEFAULT_MODEL
             else:
-                sm_idx = default_sm
-            summary_model = summary_models_list[sm_idx][0]
+                # 摘要模型：列出伺服器上所有模型
+                all_summary_models = _llm_list_models(ollama_host, ollama_port, llm_server_type or "ollama")
+                summary_models_list = []
+                for m_name in all_summary_models:
+                    desc = next((d for n, d in SUMMARY_MODELS if n == m_name), "")
+                    summary_models_list.append((m_name, desc))
+                if not summary_models_list:
+                    summary_models_list = [(n, d) for n, d in SUMMARY_MODELS]
+
+                _last_summary = _config.get("last_summary_model")
+                default_sm = 0
+                for i, (name, _) in enumerate(summary_models_list):
+                    if name == SUMMARY_DEFAULT_MODEL:
+                        default_sm = i
+                        break
+
+                def _dw_sm(s):
+                    return sum(2 if '\u4e00' <= c <= '\u9fff' else 1 for c in s)
+
+                col = max(_dw_sm(name) for name, _ in summary_models_list) + 2
+                print(f"\n\n{C_TITLE}{BOLD}▎ 摘要模型{RESET}")
+                print(f"{C_DIM}{'─' * 60}{RESET}")
+                for i, (name, desc) in enumerate(summary_models_list):
+                    padded = name + ' ' * (col - _dw_sm(name))
+                    tags = []
+                    if i == default_sm:
+                        tags.append(f"{C_HIGHLIGHT}{REVERSE} 預設 {RESET}")
+                    if name == _last_summary:
+                        tags.append(f"{C_OK}{REVERSE} 前次使用 {RESET}")
+                    tag_str = " ".join(tags)
+                    if i == default_sm:
+                        print(f"  {C_HIGHLIGHT}{BOLD}[{i}] {padded}{RESET} {C_WHITE}{desc}{RESET}  {tag_str}")
+                    else:
+                        print(f"  {C_DIM}[{i}]{RESET} {C_WHITE}{padded}{RESET} {C_DIM}{desc}{RESET}  {tag_str}")
+                # 檢查推薦摘要模型是否存在於伺服器
+                _rec_sm = {n for n, _ in _BUILTIN_SUMMARY_MODELS}
+                _avail_sm = {n for n, _ in summary_models_list}
+                if not _rec_sm & _avail_sm:
+                    _rec_sm_list = " / ".join(n for n, _ in _BUILTIN_SUMMARY_MODELS)
+                    print(f"  {C_HIGHLIGHT}注意：本 LLM 伺服器未安裝推薦摘要模型（{_rec_sm_list}），摘要品質可能不如預期{RESET}")
+                print(f"{C_DIM}{'─' * 60}{RESET}")
+                print(f"{C_WHITE}按 Enter 使用預設，或輸入編號：{RESET}", end=" ")
+
+                user_input = input().strip()
+                if user_input:
+                    try:
+                        sm_idx = int(user_input)
+                        if not (0 <= sm_idx < len(summary_models_list)):
+                            sm_idx = default_sm
+                    except ValueError:
+                        sm_idx = default_sm
+                else:
+                    sm_idx = default_sm
+                summary_model = summary_models_list[sm_idx][0]
             # 記住本次使用的摘要模型
             if summary_model != _config.get("last_summary_model"):
                 _config["last_summary_model"] = summary_model
@@ -3589,10 +3606,12 @@ def _input_interactive_menu(args):
         elif diarize_desc != "關閉":
             diarize_desc += "，本機"
         print(f"  {C_OK}  講者辨識: {diarize_desc}{RESET}")
-        if do_summarize and summary_mode != "transcript":
+        if do_summarize and summary_mode in ("both", "summary"):
             print(f"  {C_OK}  摘要模型: {summary_model}{RESET}  {C_DIM}@ {ollama_host}:{ollama_port}{RESET}")
-        elif do_summarize:
-            print(f"  {C_OK}  輸出: 逐字稿{RESET}")
+        if do_summarize and summary_mode in ("both", "correct_only"):
+            print(f"  {C_OK}  LLM 校正: 啟用{RESET}  {C_DIM}@ {ollama_host}:{ollama_port}{RESET}")
+        elif do_summarize and summary_mode == "transcript":
+            print(f"  {C_OK}  輸出: 純 ASR 逐字稿{RESET}")
         if meeting_topic:
             print(f"  {C_OK}  會議主題: {meeting_topic}{RESET}")
         print()
@@ -8417,12 +8436,13 @@ class _SummaryStatusBar:
 
 
 def call_ollama_raw(prompt, model, host, port, timeout=300, spinner=None, live_output=False,
-                    server_type="ollama", think=None):
+                    server_type="ollama", think=None, on_line=None):
     """直接呼叫 LLM API 取得回應（串流模式，可更新 spinner 進度或即時輸出）"""
     return _llm_generate(
         prompt, model, host, port, server_type,
         stream=True, timeout=timeout,
         spinner=spinner, live_output=live_output, think=think,
+        on_line=on_line,
     )
 
 
@@ -8479,10 +8499,29 @@ def _correct_segments_with_llm(segments_data, model, host, port, server_type="ol
 
             # timeout 依 chunk 字數動態調整（每千字 60 秒，最低 300 秒）
             _timeout = max(300, len(numbered_lines) // 1000 * 60 + 300)
+
+            # 即時推送每行校正結果到 WebUI
+            def _on_correct_line(line_text, _chunk=chunk):
+                line_text = line_text.strip()
+                m = re.match(r'^(\d+)\|(.+)$', line_text)
+                if not m:
+                    return
+                local_idx = int(m.group(1)) - 1
+                corrected_text = m.group(2).strip()
+                if 0 <= local_idx < len(_chunk):
+                    global_idx = _chunk[local_idx][0]
+                    orig_si, orig_li, orig_text = all_lines[global_idx]
+                    # 只在有變化時推送
+                    if corrected_text != orig_text and corrected_text != "[雜音]":
+                        _corrected_tc = S2TWP.convert(corrected_text)
+                        _webui_send({"type": "correction",
+                                     "original": orig_text,
+                                     "corrected": _corrected_tc})
+
             try:
                 result = call_ollama_raw(prompt, model, host, port, timeout=_timeout,
                                          spinner=sbar, server_type=server_type,
-                                         think=False)
+                                         think=False, on_line=_on_correct_line)
             except Exception as e:
                 print(f"  {C_HIGHLIGHT}[警告] 第 {ci+1}/{total_chunks} 批校正失敗: {e}{RESET}",
                       file=sys.stderr)
@@ -8528,12 +8567,19 @@ def _correct_segments_with_llm(segments_data, model, host, port, server_type="ol
             n_corrected += 1
 
     # 8. 移除 [雜音] 行（反向刪除避免索引偏移）
+    #    保護翻譯配對：如果該段有多行且只有此行被標為雜音，保留（避免只剩譯文沒原文）
+    _SRC_LABELS = {"EN", "英", "日"}
     n_noise = 0
     if noise_markers:
         for si in range(len(segments_data) - 1, -1, -1):
             seg = segments_data[si]
             for li in range(len(seg["lines"]) - 1, -1, -1):
                 if (si, li) in noise_markers:
+                    # 翻譯配對保護：若此行是原文且同段還有譯文，跳過不刪
+                    if len(seg["lines"]) >= 2 and seg["lines"][li]["label"] in _SRC_LABELS:
+                        has_dst = any(ln["label"] not in _SRC_LABELS for j, ln in enumerate(seg["lines"]) if j != li)
+                        if has_dst:
+                            continue  # 保留原文行
                     seg["lines"].pop(li)
                     n_noise += 1
             # 如果整段都被刪光，移除整段
@@ -9118,6 +9164,27 @@ def _segments_to_srt(segments_data, srt_path):
             f.write("\n")
 
 
+def _vtt_timestamp(seconds):
+    """秒數 → VTT 時間戳 HH:MM:SS.mmm"""
+    ms = int(round(seconds * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def _segments_to_vtt(segments_data, vtt_path):
+    """將 segments_data 轉為 WebVTT 字幕檔。翻譯模式自動雙語。"""
+    with open(vtt_path, "w", encoding="utf-8") as f:
+        f.write("WEBVTT\n\n")
+        for i, seg in enumerate(segments_data, 1):
+            f.write(f"{i}\n")
+            f.write(f"{_vtt_timestamp(seg['start'])} --> {_vtt_timestamp(seg['end'])}\n")
+            for line in seg["lines"]:
+                f.write(f"{line['text']}\n")
+            f.write("\n")
+
+
 def process_audio_file(input_path, mode, translator, model_size="large-v3-turbo",
                        diarize=False, num_speakers=None, remote_whisper_cfg=None,
                        correct_with_llm=False, llm_model=None, llm_host=None,
@@ -9521,12 +9588,14 @@ def process_audio_file(input_path, mode, translator, model_size="large-v3-turbo"
             if _srv_label_c:
                 _loc_c += f" ({_srv_label_c})"
             _meta["correct_location"] = _loc_c
-        # 產出 SRT 字幕檔（在 HTML 之前，讓 HTML footer 能偵測到 SRT）
+        # 產出 SRT / VTT 字幕檔（在 HTML 之前，讓 HTML footer 能偵測到）
         _srt = None
         if segments_data:
             srt_path = os.path.splitext(log_path)[0] + ".srt"
             _segments_to_srt(segments_data, srt_path)
             _srt = srt_path
+            vtt_path = os.path.splitext(log_path)[0] + ".vtt"
+            _segments_to_vtt(segments_data, vtt_path)
 
         if segments_data:
             _transcript_to_html(segments_data, transcript_html_path,
@@ -10006,12 +10075,14 @@ def process_bidi_audio_files(lb_path, mic_path, mode, translator_lb, translator_
                 if _detected >= 2:
                     _meta["detected_speakers"] = _detected
 
-        # SRT
+        # SRT / VTT
         _srt = None
         if segments_data:
             srt_path = os.path.splitext(log_path)[0] + ".srt"
             _segments_to_srt(segments_data, srt_path)
             _srt = srt_path
+            vtt_path = os.path.splitext(log_path)[0] + ".vtt"
+            _segments_to_vtt(segments_data, vtt_path)
 
         # 用系統音訊的副本作為 HTML 主音訊
         audio_copy = os.path.join(session_dir, os.path.basename(lb_path))
@@ -10156,7 +10227,7 @@ def summarize_log_file(input_path, model, host, port, server_type="ollama",
                        topic=None, metadata=None, summary_mode="both",
                        audio_path="", summary_rounds=1):
     """讀取記錄檔 → 建 prompt → 呼叫 LLM → 簡繁轉換 → 寫摘要檔
-    summary_mode: "both"（摘要+逐字稿）、"summary"（只摘要）、"transcript"（只逐字稿）
+    summary_mode: "both"（摘要+逐字稿）、"summary"（只摘要）、"correct_only"（只校正）、"transcript"（純 ASR）
     summary_rounds: 處理次數（1-3），多次處理後整合可提升品質
     回傳 (output_path, summary_text, html_path)"""
     with open(input_path, "r", encoding="utf-8") as f:
@@ -10590,7 +10661,23 @@ def _summary_to_html(summary_text, html_path, source_name="",
                 spk_label = html_mod.escape(f"Speaker {current_speaker}：")
                 body_parts.append(f'<p class="speaker" style="color:{color}"><strong>{spk_label}</strong>{escaped}</p>')
             else:
-                body_parts.append(f"<p>{escaped}</p>")
+                # 超長段落（LLM 未分段的校正逐字稿）→ 每 5 句左右自動插入段落分隔
+                if len(s) > 500:
+                    sentences = re.split(r'(?<=[。！？.!?])\s*', s)
+                    chunk, chunks = [], []
+                    for sent in sentences:
+                        chunk.append(sent)
+                        if len(chunk) >= 5:
+                            chunks.append("".join(chunk))
+                            chunk = []
+                    if chunk:
+                        chunks.append("".join(chunk))
+                    for c in chunks:
+                        c_esc = html_mod.escape(c)
+                        c_esc = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', c_esc)
+                        body_parts.append(f"<p>{c_esc}</p>")
+                else:
+                    body_parts.append(f"<p>{escaped}</p>")
 
     if in_ol:
         body_parts.append("</ol>")
@@ -10620,6 +10707,10 @@ def _summary_to_html(summary_text, html_path, source_name="",
         _srt_full = os.path.join(os.path.dirname(html_path), _srt_bn)
         if os.path.isfile(_srt_full):
             footer_links.append(f'<a href="{html_mod.escape(_srt_bn)}">字幕檔 (SRT)</a>')
+        _vtt_bn = os.path.splitext(os.path.basename(transcript_txt_path))[0] + ".vtt"
+        _vtt_full = os.path.join(os.path.dirname(html_path), _vtt_bn)
+        if os.path.isfile(_vtt_full):
+            footer_links.append(f'<a href="{html_mod.escape(_vtt_bn)}">字幕檔 (VTT)</a>')
     if audio_path and os.path.isfile(audio_path):
         _html_dir = os.path.dirname(os.path.abspath(html_path))
         _audio_rel = os.path.relpath(os.path.abspath(audio_path), _html_dir)
@@ -10959,6 +11050,10 @@ def _transcript_to_html(segments_data, html_path, audio_path, audio_duration,
     _srt_full = os.path.join(os.path.dirname(html_path), _srt_bn)
     if os.path.isfile(_srt_full):
         footer_links.append(f'<a href="{html_mod.escape(_srt_bn)}">字幕檔 (SRT)</a>')
+    _vtt_bn = os.path.splitext(os.path.basename(txt_path))[0] + ".vtt"
+    _vtt_full = os.path.join(os.path.dirname(html_path), _vtt_bn)
+    if os.path.isfile(_vtt_full):
+        footer_links.append(f'<a href="{html_mod.escape(_vtt_bn)}">字幕檔 (VTT)</a>')
     _audio_ext = os.path.splitext(audio_path)[1].lstrip(".").upper() or "音訊"
     footer_links.append(f'<a href="{audio_src}">音訊檔案 ({_audio_ext})</a>')
     footer_links = [l.replace("<a ", '<a target="_blank" ') for l in footer_links]
@@ -12024,7 +12119,7 @@ def main():
             diarize = args.diarize
             num_speakers = args.num_speakers
             do_summarize = args.summarize is not None
-            summary_mode = "both"  # CLI 模式預設
+            summary_mode = "both" if do_summarize else "correct_only"  # 有 --summarize 才產摘要，否則只校正
             _default_fw = "large-v3" if (mode in _NOENG_MODELS and (REMOTE_WHISPER_CONFIG or _has_local_gpu())) else "large-v3-turbo"
             fw_model = args.model or _default_fw
             host, port = _resolve_ollama_host(args)
@@ -12080,15 +12175,17 @@ def main():
         # ── 連線檢查 ──
         ollama_available = False
         need_llm_translate = need_translate and engine == "llm"
-        need_llm_summary = do_summarize and summary_mode != "transcript"
+        need_llm_summary = do_summarize and summary_mode in ("both", "summary")
+        # 純轉錄模式：有 LLM 設定時自動校正逐字稿
+        need_llm_correct = (not need_translate) and host is not None
         need_remote_asr = use_remote_whisper and REMOTE_WHISPER_CONFIG
-        need_check = need_llm_translate or need_llm_summary or need_remote_asr
+        need_check = need_llm_translate or need_llm_summary or need_llm_correct or need_remote_asr
 
         if need_check:
             print(f"\n\n{C_TITLE}{BOLD}▎ 連線檢查{RESET}")
             print(f"{C_DIM}{'─' * 60}{RESET}")
 
-        if need_llm_translate or need_llm_summary:
+        if need_llm_translate or need_llm_summary or need_llm_correct:
             if not server_type:
                 server_type = _detect_llm_server(host, port)
             if server_type:
@@ -12097,9 +12194,11 @@ def main():
                     print(f"  {C_WHITE}LLM 翻譯    {RESET}{C_WHITE}{ollama_model}{RESET} {C_DIM}@ {host}:{port} ({srv_label}){RESET} {C_OK}✓{RESET}")
                 if need_llm_summary:
                     print(f"  {C_WHITE}LLM 摘要    {RESET}{C_WHITE}{summary_model}{RESET} {C_DIM}@ {host}:{port} ({srv_label}){RESET} {C_OK}✓{RESET}")
+                if need_llm_correct and not need_llm_translate:
+                    print(f"  {C_WHITE}LLM 校正    {RESET}{C_WHITE}{summary_model}{RESET} {C_DIM}@ {host}:{port} ({srv_label}){RESET} {C_OK}✓{RESET}")
                 ollama_available = True
             else:
-                label = "LLM" if need_llm_translate else "LLM 摘要"
+                label = "LLM" if need_llm_translate else ("LLM 校正" if need_llm_correct else "LLM 摘要")
                 model_name_display = ollama_model if need_llm_translate else summary_model
                 pad = " " * (12 - _str_display_width(label))
                 print(f"  {C_WHITE}{label}{pad}{RESET}{C_WHITE}{model_name_display}{RESET} {C_DIM}@ {host}:{port}{RESET} {C_HIGHLIGHT}✗ 無法連接{RESET}")
@@ -12192,8 +12291,10 @@ def main():
                 sp_info += "，本機"
             sp_info += f"，{num_speakers} 人" if num_speakers else "，自動偵測"
             print(f"  {C_WHITE}講者辨識    {sp_info}{RESET}")
-        if do_summarize and summary_mode != "transcript" and host:
+        if summary_mode in ("both", "summary") and host:
             print(f"  {C_WHITE}摘要模型    {summary_model} @ {host}:{port}{RESET}")
+        if ollama_available and summary_mode in ("both", "correct_only"):
+            print(f"  {C_WHITE}LLM 校正    啟用{RESET}")
         if meeting_topic:
             print(f"  {C_WHITE}會議主題    {meeting_topic}{RESET}")
         print(f"  {C_WHITE}檔案數      {RESET}{C_DIM}{len(args.input)}{RESET}")
@@ -12201,8 +12302,8 @@ def main():
         # CLI 指令回顯 + 確認（在設定總覽區塊內）
         _cli_kw = dict(input_files=args.input, mode=mode, model=fw_model,
                        diarize=diarize, num_speakers=num_speakers,
-                       summarize=(do_summarize and summary_mode != "transcript"),
-                       summary_model=summary_model if summary_mode != "transcript" else None,
+                       summarize=(summary_mode in ("both", "summary")),
+                       summary_model=summary_model if summary_mode in ("both", "summary") else None,
                        engine=engine if engine in ("argos", "nllb") else None,
                        llm_model=ollama_model if need_translate and engine == "llm" else None,
                        llm_host=f"{host}:{port}" if need_translate and engine == "llm" and host else None,
@@ -12212,7 +12313,7 @@ def main():
             sys.exit(0)
 
         # 逐檔處理
-        _do_llm_correct = do_summarize and can_summarize and summary_mode != "transcript"
+        _do_llm_correct = can_summarize and summary_mode in ("both", "correct_only")
         log_paths = []  # list of (log_path, original_input_path, session_dir)
         html_to_open = []  # 收集所有 HTML，最後一起開啟
 
@@ -12302,8 +12403,8 @@ def main():
         if remote_whisper_cfg:
             _ssh_close_cm(remote_whisper_cfg)
 
-        # 如果需要摘要且 LLM 伺服器可用，對產生的 log 檔自動摘要
-        if do_summarize and log_paths and can_summarize:
+        # 如果需要摘要且 LLM 伺服器可用，對產生的 log 檔自動摘要（correct_only 不產摘要）
+        if log_paths and can_summarize and summary_mode in ("both", "summary"):
             print(f"\n\n{C_TITLE}{BOLD}▎ 自動摘要{RESET}")
             print(f"{C_DIM}{'─' * 60}{RESET}")
             print(f"  {C_DIM}摘要模型: {summary_model} ({host}:{port}){RESET}")
@@ -12368,6 +12469,29 @@ def main():
                         print(f"{C_DIM}{'═' * 60}{RESET}")
                 except Exception as e:
                     print(f"  {C_HIGHLIGHT}[錯誤] 摘要失敗: {e}{RESET}")
+
+        # 送出所有產出檔案給 WebUI
+        _output_files = []
+        for lp, orig_fpath, sess_dir in log_paths:
+            if sess_dir and os.path.isdir(sess_dir):
+                for fname in sorted(os.listdir(sess_dir)):
+                    fpath = os.path.join(sess_dir, fname)
+                    if os.path.isfile(fpath):
+                        # 排除原始音訊副本（太大不需要列出）
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext in (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".wma", ".aac", ".opus"):
+                            continue
+                        rel = os.path.relpath(fpath, os.path.dirname(os.path.abspath(__file__)))
+                        _output_files.append({"name": fname, "path": rel})
+        # 收集 session 目錄（相對路徑）
+        _session_dirs = []
+        for _, _, sess_dir in log_paths:
+            if sess_dir and os.path.isdir(sess_dir):
+                rel = os.path.relpath(sess_dir, os.path.dirname(os.path.abspath(__file__)))
+                if rel not in _session_dirs:
+                    _session_dirs.append(rel)
+        if _output_files or _session_dirs:
+            _webui_send({"type": "output_files", "files": _output_files, "dirs": _session_dirs})
 
         # 所有處理完成後一起開啟 HTML + 子目錄
         for hp in html_to_open:
