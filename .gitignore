@@ -1,0 +1,15 @@
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local runtime artifacts
+.whisper_output.txt
+config.json
+logs/
+recordings/
+
+# Local install artifacts
+venv/
+whisper.cpp/

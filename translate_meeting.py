@@ -75,6 +75,7 @@ RESET = "\x1b[0m"
 # 24-bit 真彩色
 C_TITLE = "\x1b[38;2;100;180;255m"   # 藍色 - 標題
 C_HIGHLIGHT = "\x1b[38;2;255;220;80m" # 黃色 - 重點/預設
+C_WARN = C_HIGHLIGHT                  # 黃色 - 提醒/警告
 C_EN = "\x1b[38;2;180;180;180m"       # 灰色 - 英文原文
 C_ZH = "\x1b[38;2;80;255;180m"        # 青綠 - 中文翻譯
 C_OK = "\x1b[38;2;80;255;120m"        # 綠色 - 成功
@@ -84,6 +85,11 @@ C_WHITE = "\x1b[38;2;255;255;255m"    # 白色 - 一般文字
 C_BADGE_FAST = "\x1b[48;2;80;255;120m\x1b[38;2;0;0;0m"    # 綠底黑字 < 1s
 C_BADGE_NORMAL = "\x1b[48;2;255;220;80m\x1b[38;2;0;0;0m"  # 黃底黑字 1-3s
 C_BADGE_SLOW = "\x1b[48;2;255;100;100m\x1b[38;2;0;0;0m"   # 紅底黑字 > 3s
+REALTIME_ASR_SOURCES = [
+    ("playback", "僅播放聲音", "只即時辨識系統播放音訊（對方 / YouTube）"),
+    ("mixed", "輸出+麥克風", "即時辨識播放音訊 + 自己麥克風（需聚集裝置）"),
+]
+REALTIME_ASR_SOURCE_MAP = {key: (name, desc) for key, name, desc in REALTIME_ASR_SOURCES}
 
 
 def _str_display_width(s):
@@ -121,6 +127,54 @@ def _print_with_badge(text, badge_color, elapsed):
         print(f"{text}\n    {badge_color}{badge_str}{RESET}", flush=True)
     else:
         print(f"{text}  {badge_color}{badge_str}{RESET}", flush=True)
+
+
+def _asr_source_label(source):
+    """將即時 ASR 音源 key 轉為顯示名稱。"""
+    return REALTIME_ASR_SOURCE_MAP.get(source, REALTIME_ASR_SOURCE_MAP["playback"])[0]
+
+
+def _normalize_live_text(text):
+    """正規化即時字幕文字，讓標點/空白差異不會被當成新句。"""
+    text = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
+    text = text.lower().strip()
+    return re.sub(r"[^\w\u3400-\u9fff]+", "", text)
+
+
+class _RecentSubtitleDeduper:
+    """短時間內的最近字幕去重，避免靜音時重送最後一段。"""
+
+    def __init__(self, max_entries=12, window_sec=8.0):
+        self.window_sec = window_sec
+        self._entries = deque(maxlen=max_entries)
+
+    def _trim(self, now):
+        while self._entries and now - self._entries[0][0] > self.window_sec:
+            self._entries.popleft()
+
+    def is_duplicate(self, text):
+        normalized = _normalize_live_text(text)
+        if not normalized:
+            return True
+        now = time.monotonic()
+        self._trim(now)
+        for _, prev in self._entries:
+            if normalized == prev:
+                return True
+            # 僅對較長句做包含判斷，避免短詞誤傷。
+            if min(len(normalized), len(prev)) >= 8 and (
+                normalized in prev or prev in normalized
+            ):
+                return True
+        return False
+
+    def remember(self, text):
+        normalized = _normalize_live_text(text)
+        if not normalized:
+            return
+        now = time.monotonic()
+        self._trim(now)
+        self._entries.append((now, normalized))
 
 
 # 講者辨識色彩（8 色循環，24-bit 真彩色）
@@ -659,29 +713,97 @@ def _enumerate_sdl_devices(model_path):
     return devices
 
 
-def list_audio_devices(model_path):
-    """自動選擇 BlackHole 音訊裝置（SDL2），找不到才 fallback 顯示選單"""
+def _detect_input_devices_sd():
+    """列舉 sounddevice 輸入裝置，並額外標記聚集裝置與 BlackHole。"""
+    import sounddevice as sd
+    devices = sd.query_devices()
+    input_devices = []
+    aggregate_dev = None
+    blackhole_dev = None
+
+    for i, dev in enumerate(devices):
+        if dev["max_input_channels"] <= 0:
+            continue
+        name = dev["name"]
+        ch = dev["max_input_channels"]
+        sr = int(dev["default_samplerate"])
+        entry = (i, name, ch, sr)
+        input_devices.append(entry)
+
+        if aggregate_dev is None:
+            if "聚集" in name or "aggregate" in name.lower():
+                aggregate_dev = entry
+            elif ch >= 3 and "blackhole" not in name.lower():
+                aggregate_dev = entry
+
+        if blackhole_dev is None and "blackhole" in name.lower():
+            blackhole_dev = entry
+
+    return input_devices, aggregate_dev, blackhole_dev
+
+
+def _match_sdl_device_name(devices, target_name):
+    """用 sounddevice 裝置名稱匹配 SDL2 裝置。"""
+    if not target_name:
+        return None
+
+    target_norm = target_name.strip().casefold()
+    for dev_id, dev_name in devices:
+        if dev_name.strip().casefold() == target_norm:
+            return dev_id, dev_name
+
+    for dev_id, dev_name in devices:
+        name_norm = dev_name.strip().casefold()
+        if target_norm in name_norm or name_norm in target_norm:
+            return dev_id, dev_name
+
+    return None
+
+
+def list_audio_devices(model_path, asr_source="playback"):
+    """依即時 ASR 音源偏好，自動選擇 SDL2 裝置；找不到則 fallback 顯示選單。"""
     print(f"{C_DIM}正在偵測音訊裝置...{RESET}")
 
     devices = _enumerate_sdl_devices(model_path)
-
     if not devices:
         print("[錯誤] 找不到任何音訊捕捉裝置！", file=sys.stderr)
         print("請確認 BlackHole 2ch 已安裝並重新啟動電腦。", file=sys.stderr)
         sys.exit(1)
 
-    # 自動選 BlackHole
-    for dev_id, dev_name in devices:
-        if "blackhole" in dev_name.lower():
-            print(f"  {C_OK}ASR 裝置: [{dev_id}] {dev_name}{RESET}")
-            return dev_id
+    aggregate_dev = None
+    blackhole_dev = None
+    try:
+        _, aggregate_dev, blackhole_dev = _detect_input_devices_sd()
+    except Exception:
+        pass
 
-    # 找不到 BlackHole → fallback 顯示選單讓使用者手動選
-    print(f"{C_WARN}[提醒] 未偵測到 BlackHole，請手動選擇音訊裝置{RESET}")
+    if asr_source == "mixed":
+        match = _match_sdl_device_name(devices, aggregate_dev[1] if aggregate_dev else None)
+        if match:
+            print(f"  {C_OK}ASR 裝置: [{match[0]}] {match[1]}（輸出+麥克風）{RESET}")
+            return match[0]
+        for dev_id, dev_name in devices:
+            if "聚集" in dev_name or "aggregate" in dev_name.lower():
+                print(f"  {C_OK}ASR 裝置: [{dev_id}] {dev_name}（輸出+麥克風）{RESET}")
+                return dev_id
+        if aggregate_dev:
+            print(f"{C_WARN}[提醒] sounddevice 偵測到聚集裝置「{aggregate_dev[1]}」，"
+                  f"但 whisper-stream SDL2 列表中找不到同名裝置，請手動選擇{RESET}")
+        else:
+            print(f"{C_WARN}[提醒] 未偵測到可供即時辨識的聚集裝置，請手動選擇音訊裝置{RESET}")
+    else:
+        for dev_id, dev_name in devices:
+            if "blackhole" in dev_name.lower():
+                print(f"  {C_OK}ASR 裝置: [{dev_id}] {dev_name}{RESET}")
+                return dev_id
+        print(f"{C_WARN}[提醒] 未偵測到 BlackHole，請手動選擇音訊裝置{RESET}")
+
     default_id = devices[0][0]
-
     print(f"{C_TITLE}{BOLD}▎ 音訊裝置{RESET}")
     print(f"{C_DIM}{'─' * 60}{RESET}")
+    if asr_source == "mixed":
+        print(f"  {C_DIM}請選擇含播放音訊 + 麥克風的裝置（通常是聚集裝置）{RESET}")
+        print(f"{C_DIM}{'─' * 60}{RESET}")
     for dev_id, dev_name in devices:
         if dev_id == default_id:
             print(f"  {C_HIGHLIGHT}{BOLD}[{dev_id}] {dev_name}{RESET}  {C_HIGHLIGHT}{REVERSE} 預設 {RESET}")
@@ -839,30 +961,35 @@ def _moonshine_model_arch(name):
     return mapping[name]
 
 
-def list_audio_devices_sd():
-    """自動選擇 BlackHole 音訊裝置（sounddevice），找不到才 fallback 顯示選單"""
-    devices = sd.query_devices()
-    input_devices = []
-    for i, dev in enumerate(devices):
-        if dev["max_input_channels"] > 0:
-            input_devices.append((i, dev["name"], dev["max_input_channels"], int(dev["default_samplerate"])))
+def list_audio_devices_sd(asr_source="playback"):
+    """依即時 ASR 音源偏好，自動選擇 sounddevice 裝置；找不到才 fallback 顯示選單。"""
+    import sounddevice as sd
+    input_devices, aggregate_dev, blackhole_dev = _detect_input_devices_sd()
 
     if not input_devices:
         print("[錯誤] 找不到任何音訊輸入裝置！", file=sys.stderr)
         sys.exit(1)
 
-    # 自動選 BlackHole
-    for dev_id, dev_name, _, _ in input_devices:
-        if "blackhole" in dev_name.lower():
+    if asr_source == "mixed":
+        if aggregate_dev is not None:
+            dev_id, dev_name, _, _ = aggregate_dev
+            print(f"  {C_OK}ASR 裝置: [{dev_id}] {dev_name}（輸出+麥克風）{RESET}")
+            return dev_id
+        print(f"{C_WARN}[提醒] 未偵測到聚集裝置，請手動選擇含播放音訊 + 麥克風的裝置{RESET}")
+    else:
+        if blackhole_dev is not None:
+            dev_id, dev_name, _, _ = blackhole_dev
             print(f"  {C_OK}ASR 裝置: [{dev_id}] {dev_name}{RESET}")
             return dev_id
+        print(f"{C_WARN}[提醒] 未偵測到 BlackHole，請手動選擇音訊裝置{RESET}")
 
-    # 找不到 BlackHole → fallback 顯示選單
-    print(f"{C_WARN}[提醒] 未偵測到 BlackHole，請手動選擇音訊裝置{RESET}")
     default_id = input_devices[0][0]
 
     print(f"\n\n{C_TITLE}{BOLD}▎ 音訊裝置{RESET}")
     print(f"{C_DIM}{'─' * 60}{RESET}")
+    if asr_source == "mixed":
+        print(f"  {C_DIM}請選擇含播放音訊 + 麥克風的裝置（通常是聚集裝置）{RESET}")
+        print(f"{C_DIM}{'─' * 60}{RESET}")
     for dev_id, dev_name, ch, sr in input_devices:
         info = f"{ch}ch {sr}Hz"
         if dev_id == default_id:
@@ -892,17 +1019,28 @@ def list_audio_devices_sd():
     return selected_id
 
 
-def auto_select_device_sd():
-    """非互動模式：使用 sounddevice 自動偵測 BlackHole"""
-    devices = sd.query_devices()
-    for i, dev in enumerate(devices):
-        if dev["max_input_channels"] > 0 and "blackhole" in dev["name"].lower():
-            print(f"{C_OK}自動選擇音訊裝置: [{i}] {dev['name']}{RESET}")
+def auto_select_device_sd(asr_source="playback"):
+    """非互動模式：依即時 ASR 音源偏好自動偵測 sounddevice 裝置。"""
+    import sounddevice as sd
+    input_devices, aggregate_dev, blackhole_dev = _detect_input_devices_sd()
+
+    if asr_source == "mixed":
+        if aggregate_dev is not None:
+            dev_id, dev_name, _, _ = aggregate_dev
+            print(f"{C_OK}自動選擇音訊裝置: [{dev_id}] {dev_name}（輸出+麥克風）{RESET}")
+            return dev_id
+        print(f"{C_HIGHLIGHT}[錯誤] 未偵測到聚集裝置，無法使用 --asr-source mixed。"
+              f" 請先建立 Aggregate Device，或用 --device 指定裝置 ID。{RESET}", file=sys.stderr)
+        sys.exit(1)
+
+    for i, dev_name, _, _ in input_devices:
+        if "blackhole" in dev_name.lower():
+            print(f"{C_OK}自動選擇音訊裝置: [{i}] {dev_name}{RESET}")
             return i
-    # 找不到 BlackHole，用系統預設輸入
+
     default = sd.default.device[0]
     if default is not None and default >= 0:
-        dev = devices[default]
+        dev = sd.query_devices(default)
         print(f"{C_HIGHLIGHT}未偵測到 BlackHole，使用系統預設輸入: [{default}] {dev['name']}{RESET}")
         return default
     print("[錯誤] 找不到任何音訊輸入裝置！", file=sys.stderr)
@@ -2804,7 +2942,7 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
 
     # 持續讀取輸出檔案的新內容
     last_size = 0
-    last_translated = ""
+    subtitle_deduper = _RecentSubtitleDeduper()
     buffer = ""
     _loop_tick = 0
 
@@ -2851,37 +2989,30 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
                     line = re.sub(r"\(.*?\)", "", line)  # 移除 (music), (silence) 等
                     line = line.strip()
 
-                    if not line or line == last_translated:
+                    if not line:
                         continue
 
                     if mode in ("en2zh", "en"):
                         # 英文模式：過濾英文幻覺
-                        stripped_alpha = re.sub(r"[^a-zA-Z]", "", line)
-                        if len(stripped_alpha) < 3:
+                        if _is_en_hallucination(line):
                             continue
-                        line_lower = line.lower().strip(".")
-                        if line_lower in (
-                            "you", "the", "bye", "so", "okay",
-                            "thank you", "thanks for watching",
-                            "thanks for listening", "see you next time",
-                            "subscribe", "like and subscribe",
-                        ):
+                        if subtitle_deduper.is_duplicate(line):
                             continue
 
                         if mode == "en":
                             # 英文轉錄：直接顯示
+                            subtitle_deduper.remember(line)
                             with print_lock:
                                 print(f"{C_EN}{BOLD}[EN] {line}{RESET}", flush=True)
                                 print(flush=True)
                                 _status_bar_state["count"] += 1
                                 refresh_status_bar()
-                            last_translated = line
                             timestamp = time.strftime("%H:%M:%S")
                             with open(log_path, "a", encoding="utf-8") as log_f:
                                 log_f.write(f"[{timestamp}] [EN] {line}\n\n")
                         else:
                             # 英翻中：原文延後到翻譯完成時一起顯示
-                            last_translated = line
+                            subtitle_deduper.remember(line)
                             seq = _trans_seq[0]; _trans_seq[0] += 1
                             t = threading.Thread(
                                 target=translate_and_print,
@@ -2896,19 +3027,12 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
                         if len(stripped_zh) < 2:
                             continue
                         line = S2TWP.convert(line)
-                        if line == last_translated:
+                        if _is_zh_hallucination(line):
                             continue
-                        # 過濾中文幻覺
-                        if any(kw in line for kw in (
-                            "訂閱", "點贊", "點讚", "轉發", "打賞",
-                            "感謝觀看", "謝謝大家", "謝謝收看",
-                            "字幕由", "字幕提供",
-                            "獨播", "劇場", "YoYo", "Television Series",
-                            "歡迎訂閱", "明鏡", "新聞頻道",
-                        )):
+                        if subtitle_deduper.is_duplicate(line):
                             continue
                         # 原文延後到翻譯完成時一起顯示
-                        last_translated = line
+                        subtitle_deduper.remember(line)
                         # 背景執行緒翻譯成英文
                         seq = _trans_seq[0]; _trans_seq[0] += 1
                         t = threading.Thread(
@@ -2924,22 +3048,16 @@ def run_stream(capture_id: int, translator, model_name: str, model_path: str,
                         if len(stripped_zh) < 2:
                             continue
                         line = S2TWP.convert(line)
-                        if line == last_translated:
+                        if _is_zh_hallucination(line):
                             continue
-                        if any(kw in line for kw in (
-                            "訂閱", "點贊", "點讚", "轉發", "打賞",
-                            "感謝觀看", "謝謝大家", "謝謝收看",
-                            "字幕由", "字幕提供",
-                            "獨播", "劇場", "YoYo", "Television Series",
-                            "歡迎訂閱", "明鏡", "新聞頻道",
-                        )):
+                        if subtitle_deduper.is_duplicate(line):
                             continue
+                        subtitle_deduper.remember(line)
                         with print_lock:
                             print(f"{C_ZH}{BOLD}[中] {line}{RESET}", flush=True)
                             print(flush=True)
                             _status_bar_state["count"] += 1
                             refresh_status_bar()
-                        last_translated = line
                         timestamp = time.strftime("%H:%M:%S")
                         with open(log_path, "a", encoding="utf-8") as log_f:
                             log_f.write(f"[{timestamp}] [中] {line}\n\n")
@@ -3076,20 +3194,8 @@ def run_stream_moonshine(capture_id: int, translator, moonshine_model_name: str,
             _trans_pending[seq] = (src_text, result, elapsed)
         _drain_translations(log_path)
 
-    # 幻覺過濾
-    last_translated = ""
-
-    def is_en_hallucination(text):
-        stripped_alpha = re.sub(r"[^a-zA-Z]", "", text)
-        if len(stripped_alpha) < 3:
-            return True
-        line_lower = text.lower().strip(".")
-        return line_lower in (
-            "you", "the", "bye", "so", "okay",
-            "thank you", "thanks for watching",
-            "thanks for listening", "see you next time",
-            "subscribe", "like and subscribe",
-        )
+    # 幻覺過濾 / 最近字幕去重
+    subtitle_deduper = _RecentSubtitleDeduper()
 
     # 部分文字管理
     _partial_line_id = [None]
@@ -3115,7 +3221,7 @@ def run_stream_moonshine(capture_id: int, translator, moonshine_model_name: str,
             if not text:
                 return
             if mode in ("en2zh", "en"):
-                if is_en_hallucination(text):
+                if _is_en_hallucination(text):
                     return
                 _partial_line_id[0] = event.line.line_id
                 with print_lock:
@@ -3132,38 +3238,64 @@ def run_stream_moonshine(capture_id: int, translator, moonshine_model_name: str,
         def on_line_completed(self, event):
             if pause_event.is_set():
                 return  # 暫停中，不處理
-            nonlocal last_translated
             text = event.line.text.strip()
-            if not text or text == last_translated:
+            if not text:
                 return
 
             if mode in ("en2zh", "en"):
-                if is_en_hallucination(text):
+                if _is_en_hallucination(text):
+                    return
+            else:
+                text = S2TWP.convert(text)
+                if _is_zh_hallucination(text):
                     return
 
-                if mode == "en":
-                    with print_lock:
-                        _clear_partial_line()
-                        print(f"{C_EN}{BOLD}[EN] {text}{RESET}", flush=True)
-                        print(flush=True)
-                        _status_bar_state["count"] += 1
-                        refresh_status_bar()
-                    last_translated = text
-                    timestamp = time.strftime("%H:%M:%S")
-                    with open(log_path, "a", encoding="utf-8") as log_f:
-                        log_f.write(f"[{timestamp}] [EN] {text}\n\n")
-                else:
-                    # en2zh：原文延後到翻譯完成時一起顯示
-                    with print_lock:
-                        _clear_partial_line()
-                    last_translated = text
-                    seq = _trans_seq[0]; _trans_seq[0] += 1
-                    t = threading.Thread(
-                        target=translate_and_print,
-                        args=(seq, text, log_path),
-                        daemon=True,
-                    )
-                    t.start()
+            if subtitle_deduper.is_duplicate(text):
+                return
+
+            subtitle_deduper.remember(text)
+
+            if mode == "en":
+                with print_lock:
+                    _clear_partial_line()
+                    print(f"{C_EN}{BOLD}[EN] {text}{RESET}", flush=True)
+                    print(flush=True)
+                    _status_bar_state["count"] += 1
+                    refresh_status_bar()
+                timestamp = time.strftime("%H:%M:%S")
+                with open(log_path, "a", encoding="utf-8") as log_f:
+                    log_f.write(f"[{timestamp}] [EN] {text}\n\n")
+            elif mode == "en2zh":
+                # en2zh：原文延後到翻譯完成時一起顯示
+                with print_lock:
+                    _clear_partial_line()
+                seq = _trans_seq[0]; _trans_seq[0] += 1
+                t = threading.Thread(
+                    target=translate_and_print,
+                    args=(seq, text, log_path),
+                    daemon=True,
+                )
+                t.start()
+            elif mode == "zh":
+                with print_lock:
+                    _clear_partial_line()
+                    print(f"{C_ZH}{BOLD}[中] {text}{RESET}", flush=True)
+                    print(flush=True)
+                    _status_bar_state["count"] += 1
+                    refresh_status_bar()
+                timestamp = time.strftime("%H:%M:%S")
+                with open(log_path, "a", encoding="utf-8") as log_f:
+                    log_f.write(f"[{timestamp}] [中] {text}\n\n")
+            else:
+                with print_lock:
+                    _clear_partial_line()
+                seq = _trans_seq[0]; _trans_seq[0] += 1
+                t = threading.Thread(
+                    target=translate_and_print,
+                    args=(seq, text, log_path),
+                    daemon=True,
+                )
+                t.start()
 
         def on_error(self, event):
             with print_lock:
@@ -3583,14 +3715,7 @@ def run_stream_remote(capture_id: int, translator, model_name: str,
                 pending_results[seq] = _UPLOAD_FAILED
 
     # ── 去重 ──
-    recent_texts = deque(maxlen=10)
-
-    def is_duplicate(text):
-        text_lower = text.lower().strip()
-        for prev in recent_texts:
-            if text_lower == prev or text_lower in prev or prev in text_lower:
-                return True
-        return False
+    subtitle_deduper = _RecentSubtitleDeduper()
 
     # ── 過濾 + 顯示 ──
     if mode in ("en2zh", "en"):
@@ -3635,9 +3760,9 @@ def run_stream_remote(capture_id: int, translator, model_name: str,
                 if hallucination_check(line):
                     continue
                 # 去重
-                if is_duplicate(line):
+                if subtitle_deduper.is_duplicate(line):
                     continue
-                recent_texts.append(line.lower().strip())
+                subtitle_deduper.remember(line)
                 # 顯示 + 翻譯
                 if mode in ("en2zh", "zh2en") and translator:
                     # 原文延後到翻譯完成時一起顯示，避免多段 [EN] 連續出現
@@ -4215,6 +4340,56 @@ def run_record_only(rec_device, topic=None):
         print()
 
 
+def _ask_realtime_asr_source():
+    """互動選單：選擇即時 ASR 音源（僅播放 / 輸出+麥克風）。"""
+    input_devices, aggregate_dev, blackhole_dev = _detect_input_devices_sd()
+    has_aggregate = aggregate_dev is not None
+    has_blackhole = blackhole_dev is not None
+
+    print(f"\n\n{C_TITLE}{BOLD}▎ 即時辨識音源{RESET}")
+    print(f"{C_DIM}{'─' * 60}{RESET}")
+    print(f"  {C_WHITE}選擇即時字幕要辨識哪些聲音{RESET}")
+    print(f"  {C_DIM}* 錄音裝置可另外設定，與這裡的即時 ASR 音源分開{RESET}")
+    print()
+
+    if has_blackhole and has_aggregate:
+        print(f"  {C_HIGHLIGHT}{BOLD}[1] 僅播放聲音{RESET} {C_DIM}{blackhole_dev[1]}{RESET}  {C_HIGHLIGHT}{REVERSE} 預設 {RESET}")
+        print(f"  {C_DIM}[2]{RESET} {C_WHITE}輸出+麥克風{RESET} {C_DIM}{aggregate_dev[1]}{RESET}")
+        default_choice = "1"
+    elif has_blackhole:
+        print(f"  {C_HIGHLIGHT}{BOLD}[1] 僅播放聲音{RESET} {C_DIM}{blackhole_dev[1]}{RESET}  {C_HIGHLIGHT}{REVERSE} 預設 {RESET}")
+        print(f"  {C_DIM}[2] 輸出+麥克風  未偵測到聚集裝置{RESET}")
+        default_choice = "1"
+    elif has_aggregate:
+        print(f"  {C_DIM}[1] 僅播放聲音  未偵測到 BlackHole{RESET}")
+        print(f"  {C_HIGHLIGHT}{BOLD}[2] 輸出+麥克風{RESET} {C_DIM}{aggregate_dev[1]}{RESET}  {C_HIGHLIGHT}{REVERSE} 預設 {RESET}")
+        default_choice = "2"
+    elif input_devices:
+        print(f"  {C_DIM}[1] 僅播放聲音  未偵測到 BlackHole{RESET}")
+        print(f"  {C_DIM}[2] 輸出+麥克風  未偵測到聚集裝置{RESET}")
+        print(f"  {C_HIGHLIGHT}後續會請你手動選擇即時辨識裝置{RESET}")
+        default_choice = "1"
+    else:
+        print(f"  {C_HIGHLIGHT}[錯誤] 找不到任何音訊輸入裝置{RESET}")
+        sys.exit(1)
+
+    print(f"{C_DIM}{'─' * 60}{RESET}")
+    print(f"{C_WHITE}選擇 (1-2) [{default_choice}]：{RESET}", end=" ")
+    try:
+        user_input = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(0)
+
+    choice = user_input if user_input else default_choice
+    if choice == "2":
+        print(f"  {C_OK}→ 輸出+麥克風{RESET}\n")
+        return "mixed"
+
+    print(f"  {C_OK}→ 僅播放聲音{RESET}\n")
+    return "playback"
+
+
 def _select_audio_files():
     """掃描 RECORDING_DIR，列出音訊檔供選擇（每頁 10 筆，可翻頁）。
     回傳 [filepath] (list)，或 None 表示無檔案。"""
@@ -4399,7 +4574,7 @@ def _ask_input_source():
         return ("realtime", None)
 
 
-def _ask_record():
+def _ask_record(asr_source="playback"):
     """互動選單：詢問錄製音訊方式（混合/僅播放/不錄）。
     回傳 (record: bool, rec_device: int or None)"""
     import sounddevice as sd
@@ -4437,7 +4612,10 @@ def _ask_record():
     print(f"\n\n{C_TITLE}{BOLD}▎ 錄製音訊{RESET}")
     print(f"{C_DIM}{'─' * 60}{RESET}")
     print(f"  {C_WHITE}同時錄製音訊為 WAV 檔（儲存於 recordings/）{RESET}")
-    print(f"  {C_DIM}* 即時辨識僅處理播放聲音，無法即時辨識我方說話的聲音{RESET}")
+    if asr_source == "mixed":
+        print(f"  {C_DIM}* 即時辨識目前會處理播放聲音 + 麥克風；錄音來源可另外設定{RESET}")
+    else:
+        print(f"  {C_DIM}* 即時辨識僅處理播放聲音，無法即時辨識我方說話的聲音{RESET}")
     print()
 
     # 選項文字固定寬度對齊（「混合錄製（輸出+輸入）」顯示寬 20 全形字元）
@@ -6821,6 +6999,7 @@ def parse_args():
         ("./start.sh -s training", "教育訓練場景"),
         ("./start.sh --mode zh", "中文轉錄模式"),
         ("./start.sh --asr moonshine", "使用 Moonshine 引擎"),
+        ("./start.sh --asr-source mixed", "即時辨識輸出+麥克風"),
         ("./start.sh --topic 'ZFS 儲存管理'", "指定會議主題，提升翻譯品質"),
         ("./start.sh -m large-v3-turbo -e llm -d 0", "全部指定，跳過選單"),
         ("./start.sh --input meeting.mp3", "離線處理音訊檔（互動選單）"),
@@ -6869,6 +7048,9 @@ def parse_args():
         "-d", "--device", type=int, metavar="ID",
         help="音訊裝置 ID (數字，可用 --list-devices 查詢)")
     parser.add_argument(
+        "--asr-source", choices=["playback", "mixed"], metavar="SRC",
+        help="即時 ASR 音源 (playback=僅播放聲音 / mixed=輸出+麥克風)")
+    parser.add_argument(
         "-e", "--engine", choices=["llm", "argos"], metavar="ENGINE",
         help="翻譯引擎 (llm / argos，llm 支援 Ollama 及 OpenAI 相容伺服器)")
     parser.add_argument(
@@ -6910,21 +7092,45 @@ def parse_args():
     return parser.parse_args()
 
 
-def auto_select_device(model_path):
-    """非互動模式：自動偵測 BlackHole 裝置，找不到就報錯退出"""
+def auto_select_device(model_path, asr_source="playback"):
+    """非互動模式：依即時 ASR 音源偏好自動偵測 SDL2 裝置。"""
     devices = _enumerate_sdl_devices(model_path)
 
     if not devices:
         print("[錯誤] 找不到任何音訊捕捉裝置！", file=sys.stderr)
         sys.exit(1)
 
-    # 自動選 BlackHole
+    if asr_source == "mixed":
+        aggregate_dev = None
+        try:
+            _, aggregate_dev, _ = _detect_input_devices_sd()
+        except Exception:
+            pass
+
+        match = _match_sdl_device_name(devices, aggregate_dev[1] if aggregate_dev else None)
+        if match:
+            print(f"{C_OK}自動選擇音訊裝置: [{match[0]}] {match[1]}（輸出+麥克風）{RESET}")
+            return match[0]
+
+        for dev_id, dev_name in devices:
+            if "聚集" in dev_name or "aggregate" in dev_name.lower():
+                print(f"{C_OK}自動選擇音訊裝置: [{dev_id}] {dev_name}（輸出+麥克風）{RESET}")
+                return dev_id
+
+        if aggregate_dev:
+            print(f"{C_HIGHLIGHT}[錯誤] sounddevice 偵測到聚集裝置「{aggregate_dev[1]}」，"
+                  f"但 whisper-stream SDL2 列表中找不到同名裝置。"
+                  f" 請用 --device 指定 SDL2 裝置 ID。{RESET}", file=sys.stderr)
+        else:
+            print(f"{C_HIGHLIGHT}[錯誤] 未偵測到聚集裝置，無法使用 --asr-source mixed。"
+                  f" 請先建立 Aggregate Device，或用 --device 指定裝置 ID。{RESET}", file=sys.stderr)
+        sys.exit(1)
+
     for dev_id, dev_name in devices:
         if "blackhole" in dev_name.lower():
             print(f"{C_OK}自動選擇音訊裝置: [{dev_id}] {dev_name}{RESET}")
             return dev_id
 
-    # 找不到 BlackHole，用第一個裝置
     dev_id, dev_name = devices[0]
     print(f"{C_HIGHLIGHT}未偵測到 BlackHole，使用: [{dev_id}] {dev_name}{RESET}")
     return dev_id
@@ -6941,6 +7147,33 @@ def resolve_model(model_name):
             sys.exit(1)
     print(f"[錯誤] 不認識的模型: {model_name}", file=sys.stderr)
     sys.exit(1)
+
+
+def _pick_local_realtime_whisper_model(mode="en2zh"):
+    """本機即時 Whisper 預設模型選擇。
+    中文模式優先 large-v3，缺檔時自動降級到 large-v3-turbo。"""
+    is_chinese = mode in ("zh", "zh2en")
+    preferred = ["large-v3", "large-v3-turbo"] if is_chinese else [
+        "large-v3-turbo", "medium.en", "small.en", "base.en", "large-v3"
+    ]
+
+    available = []
+    for name, filename, _desc in WHISPER_MODELS:
+        if is_chinese and name.endswith(".en"):
+            continue
+        path = os.path.join(MODELS_DIR, filename)
+        if os.path.isfile(path):
+            available.append(name)
+
+    if not available:
+        print("[錯誤] 找不到任何可用的本機 Whisper 模型檔案！", file=sys.stderr)
+        sys.exit(1)
+
+    for name in preferred:
+        if name in available:
+            return name
+
+    return available[0]
 
 
 def _resolve_ollama_host(args):
@@ -7010,6 +7243,10 @@ def _build_cli_command(**kwargs):
     if device is not None:
         parts.append(f"-d {device}")
 
+    asr_source = kwargs.get("asr_source")
+    if asr_source:
+        parts.append(f"--asr-source {shlex.quote(asr_source)}")
+
     diarize = kwargs.get("diarize")
     if diarize:
         parts.append("--diarize")
@@ -7063,6 +7300,10 @@ def main():
     # --rec-device 自動啟用 --record
     if args.rec_device is not None and not args.record:
         args.record = True
+
+    # 即時 ASR 音源預設維持既有行為：僅播放聲音（BlackHole）
+    if not args.asr_source:
+        args.asr_source = "playback"
 
     # --num-speakers 沒搭配 --diarize 時警告
     if args.num_speakers and not args.diarize:
@@ -7607,6 +7848,7 @@ def main():
     if cli_mode:
         # CLI 模式：用參數 + 預設值，跳過選單
         mode = args.mode or "en2zh"
+        asr_source = args.asr_source or "playback"
 
         # 純錄音模式：跳過 ASR，直接錄音
         if mode == "record":
@@ -7650,7 +7892,7 @@ def main():
             if args.device is not None:
                 capture_id = args.device
             else:
-                capture_id = auto_select_device_sd()
+                capture_id = auto_select_device_sd(asr_source)
 
             translator = None
             meeting_topic = args.topic
@@ -7688,7 +7930,7 @@ def main():
             rw_host = REMOTE_WHISPER_CONFIG.get("host", "?")
             mode_label = next(name for k, name, _ in MODE_PRESETS if k == mode)
             print(f"{C_DIM}模式: {mode_label} | ASR: Whisper ({model_name}) @ 遠端 GPU（{rw_host}） | "
-                  f"裝置: {capture_id} | 翻譯: {engine}{RESET}")
+                  f"音源: {_asr_source_label(asr_source)} | 裝置: {capture_id} | 翻譯: {engine}{RESET}")
             if meeting_topic:
                 print(f"{C_DIM}會議主題: {meeting_topic}{RESET}")
             _cli_kw = dict(mode=mode, model=model_name, device=args.device,
@@ -7696,6 +7938,7 @@ def main():
                            llm_model=ollama_model if mode in ("en2zh", "zh2en") and engine == "llm" else None,
                            engine=engine if mode in ("en2zh", "zh2en") else None,
                            llm_host=f"{host}:{port}" if mode in ("en2zh", "zh2en") and engine == "llm" else None,
+                           asr_source=asr_source,
                            record=args.record, rec_device=args.rec_device)
             if not _confirm_start(_build_cli_command(**_cli_kw)):
                 sys.exit(0)
@@ -7713,7 +7956,7 @@ def main():
             if args.device is not None:
                 capture_id = args.device
             else:
-                capture_id = auto_select_device_sd()
+                capture_id = auto_select_device_sd(asr_source)
 
             translator = None
             host, port = _resolve_ollama_host(args)
@@ -7745,7 +7988,7 @@ def main():
 
             mode_label = next(name for k, name, _ in MODE_PRESETS if k == mode)
             print(f"{C_DIM}模式: {mode_label} | ASR: Moonshine ({ms_model_name}) | "
-                  f"裝置: {capture_id} | 翻譯: {engine if mode == 'en2zh' else '無'}{RESET}")
+                  f"音源: {_asr_source_label(asr_source)} | 裝置: {capture_id} | 翻譯: {engine if mode == 'en2zh' else '無'}{RESET}")
             if meeting_topic:
                 print(f"{C_DIM}會議主題: {meeting_topic}{RESET}")
             _cli_kw = dict(mode=mode, asr="moonshine", moonshine_model=ms_model_name,
@@ -7753,6 +7996,7 @@ def main():
                            llm_model=ollama_model if mode == "en2zh" and engine == "llm" else None,
                            engine=engine if mode == "en2zh" else None,
                            llm_host=f"{host}:{port}" if mode == "en2zh" and engine == "llm" else None,
+                           asr_source=asr_source,
                            record=args.record, rec_device=args.rec_device)
             if not _confirm_start(_build_cli_command(**_cli_kw)):
                 sys.exit(0)
@@ -7763,15 +8007,16 @@ def main():
         else:
             check_dependencies(asr_engine)
             # Whisper 本機模式（原有邏輯）
-            if mode in ("zh", "zh2en"):
-                default_model = "large-v3"
-            else:
-                default_model = "large-v3-turbo"
+            default_model = _pick_local_realtime_whisper_model(mode)
             model_name = args.model or default_model
             if mode in ("zh", "zh2en") and model_name.endswith(".en"):
                 print(f"[錯誤] {mode} 模式不支援 {model_name}（僅英文模型），請用 large-v3 或 large-v3-turbo",
                       file=sys.stderr)
                 sys.exit(1)
+            if not args.model:
+                preferred_model = "large-v3" if mode in ("zh", "zh2en") else "large-v3-turbo"
+                if model_name != preferred_model:
+                    print(f"{C_WARN}[提醒] 未找到預設模型 {preferred_model}，改用已安裝模型 {model_name}{RESET}")
             model_name, model_path = resolve_model(model_name)
 
             scene_key = args.scene or "training"
@@ -7781,7 +8026,7 @@ def main():
             if args.device is not None:
                 capture_id = args.device
             else:
-                capture_id = auto_select_device(model_path)
+                capture_id = auto_select_device(model_path, asr_source)
 
             translator = None
             meeting_topic = args.topic
@@ -7816,7 +8061,7 @@ def main():
 
             mode_label = next(name for k, name, _ in MODE_PRESETS if k == mode)
             print(f"{C_DIM}模式: {mode_label} | ASR: Whisper ({model_name}) | 場景: {scene_key} | "
-                  f"裝置: {capture_id} | 翻譯: {engine}{RESET}")
+                  f"音源: {_asr_source_label(asr_source)} | 裝置: {capture_id} | 翻譯: {engine}{RESET}")
             if meeting_topic:
                 print(f"{C_DIM}會議主題: {meeting_topic}{RESET}")
             _cli_kw = dict(mode=mode, model=model_name, scene=args.scene,
@@ -7824,6 +8069,7 @@ def main():
                            llm_model=ollama_model if mode in ("en2zh", "zh2en") and engine == "llm" else None,
                            engine=engine if mode in ("en2zh", "zh2en") else None,
                            llm_host=f"{host}:{port}" if mode in ("en2zh", "zh2en") and engine == "llm" else None,
+                           asr_source=asr_source,
                            record=args.record, rec_device=args.rec_device)
             if not _confirm_start(_build_cli_command(**_cli_kw)):
                 sys.exit(0)
@@ -7872,21 +8118,24 @@ def main():
                         sys.exit(1)
                     translator = ArgosTranslator()
 
+            asr_source = _ask_realtime_asr_source()
+
             # 錄音
-            record, rec_device = _ask_record()
+            record, rec_device = _ask_record(asr_source)
 
             # 遠端 Whisper 模型選擇（帶快取標籤）
             r_model_name = select_whisper_model_remote(mode)
 
             # 音訊裝置（PortAudio，不是 SDL2）
-            capture_id = list_audio_devices_sd()
+            capture_id = list_audio_devices_sd(asr_source)
 
             _cli_kw = dict(mode=mode, model=r_model_name, device=capture_id,
                            topic=meeting_topic,
                            record=record, rec_device=rec_device,
                            engine=engine if mode in ("en2zh", "zh2en") else None,
                            llm_model=model if mode in ("en2zh", "zh2en") and engine == "llm" else None,
-                           llm_host=f"{host}:{port}" if mode in ("en2zh", "zh2en") and engine == "llm" else None)
+                           llm_host=f"{host}:{port}" if mode in ("en2zh", "zh2en") and engine == "llm" else None,
+                           asr_source=asr_source)
             if not _confirm_start(_build_cli_command(**_cli_kw)):
                 sys.exit(0)
             run_stream_remote(capture_id, translator, r_model_name, REMOTE_WHISPER_CONFIG,
@@ -7934,19 +8183,22 @@ def main():
                         sys.exit(1)
                     translator = ArgosTranslator()
 
+            asr_source = _ask_realtime_asr_source()
+
             # 詢問是否錄音（自動偵測錄音裝置）
-            record, rec_device = _ask_record()
+            record, rec_device = _ask_record(asr_source)
 
             # ASR 模型 + 場景 + 自動偵測 ASR 裝置
             if asr_engine == "moonshine":
                 ms_model_name = select_moonshine_model()
-                capture_id = list_audio_devices_sd()
+                capture_id = list_audio_devices_sd(asr_source)
                 _cli_kw = dict(mode=mode, asr="moonshine", moonshine_model=ms_model_name,
                                device=capture_id, topic=meeting_topic,
                                record=record, rec_device=rec_device,
                                engine=engine if mode == "en2zh" and engine else None,
                                llm_model=model if mode == "en2zh" and engine == "llm" else None,
-                               llm_host=f"{host}:{port}" if mode == "en2zh" and engine == "llm" else None)
+                               llm_host=f"{host}:{port}" if mode == "en2zh" and engine == "llm" else None,
+                               asr_source=asr_source)
                 if not _confirm_start(_build_cli_command(**_cli_kw)):
                     sys.exit(0)
                 run_stream_moonshine(capture_id, translator, ms_model_name, mode,
@@ -7955,14 +8207,15 @@ def main():
             else:
                 model_name, model_path = select_whisper_model(mode)
                 length_ms, step_ms = select_scene()
-                capture_id = list_audio_devices(model_path)
+                capture_id = list_audio_devices(model_path, asr_source)
                 _need_llm = mode in ("en2zh", "zh2en") and engine == "llm"
                 _cli_kw = dict(mode=mode, model=model_name,
                                device=capture_id, topic=meeting_topic,
                                record=record, rec_device=rec_device,
                                engine=engine if mode in ("en2zh", "zh2en") else None,
                                llm_model=model if _need_llm else None,
-                               llm_host=f"{host}:{port}" if _need_llm else None)
+                               llm_host=f"{host}:{port}" if _need_llm else None,
+                               asr_source=asr_source)
                 if not _confirm_start(_build_cli_command(**_cli_kw)):
                     sys.exit(0)
                 run_stream(capture_id, translator, model_name, model_path, length_ms, step_ms, mode,
