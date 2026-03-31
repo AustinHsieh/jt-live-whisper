@@ -22,6 +22,8 @@ import threading
 import time
 import wave
 from collections import deque
+from dataclasses import dataclass
+import getpass
 
 # 避免 OpenMP 重複載入衝突
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -80,7 +82,7 @@ C_EN = "\x1b[38;2;180;180;180m"       # 灰色 - 英文原文
 C_ZH = "\x1b[38;2;80;255;180m"        # 青綠 - 中文翻譯
 C_OK = "\x1b[38;2;80;255;120m"        # 綠色 - 成功
 C_DIM = "\x1b[38;2;100;100;100m"      # 暗灰 - 次要資訊
-C_WHITE = "\x1b[38;2;255;255;255m"    # 白色 - 一般文字
+C_WHITE = "\x1b[39m"                  # 終端預設前景色 - 一般文字
 # 速度標籤（背景色 + 黑字，不用 REVERSE 以避免換行時色塊延伸）
 C_BADGE_FAST = "\x1b[48;2;80;255;120m\x1b[38;2;0;0;0m"    # 綠底黑字 < 1s
 C_BADGE_NORMAL = "\x1b[48;2;255;220;80m\x1b[38;2;0;0;0m"  # 黃底黑字 1-3s
@@ -201,6 +203,7 @@ ARGOS_PKG_PATH = os.path.expanduser(
 # LLM 伺服器設定（預設無，由 config.json 或 --llm-host 指定）
 OLLAMA_DEFAULT_HOST = None
 OLLAMA_DEFAULT_PORT = 11434
+OPENAI_API_BASE = "https://api.openai.com"
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 
 
@@ -320,10 +323,25 @@ for item in _user_summary:
         if name not in _existing_summary:
             SUMMARY_MODELS.append((name, item.get("desc", "")))
             _existing_summary.add(name)
+
+SUMMARY_PROVIDERS = [
+    ("local", "本機 / 區網 LLM 伺服器", "使用既有 LLM 伺服器（Ollama / OpenAI 相容）"),
+    ("openai", "OpenAI 官方 API", "直接使用 OpenAI 官方模型做摘要"),
+]
 # 分段門檻的保底值（查不到模型 context window 時使用）
 SUMMARY_CHUNK_FALLBACK_CHARS = 6000
 # prompt 模板 + 回應預留的 token 數（不算逐字稿本身）
 SUMMARY_PROMPT_OVERHEAD_TOKENS = 2000
+
+
+@dataclass
+class SummaryLLMConfig:
+    provider: str = "local"
+    model: str = ""
+    host: str = None
+    port: int = None
+    server_type: str = "ollama"
+    api_key: str = ""
 
 SUMMARY_PROMPT_TEMPLATE = """\
 你是專業的會議記錄整理員。請根據以下即時轉錄的逐字稿，完成兩件事：
@@ -1267,16 +1285,36 @@ def _detect_llm_server(host, port):
     return None
 
 
-def _llm_list_models(host, port, server_type):
+def _llm_http_base(host, port, provider="local"):
+    if provider == "openai":
+        return OPENAI_API_BASE
+    return f"http://{host}:{port}"
+
+
+def _llm_request_headers(provider="local", api_key=""):
+    headers = {"Content-Type": "application/json"}
+    if provider == "openai" and api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _llm_list_models(host, port, server_type, api_key="", provider="local"):
     """列出 LLM 伺服器上的模型，回傳 list[str]"""
     try:
+        base_url = _llm_http_base(host, port, provider=provider)
+        headers = _llm_request_headers(provider=provider, api_key=api_key)
+        if provider == "openai":
+            req = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+                return [m["id"] for m in data.get("data", []) if m.get("id")]
         if server_type == "ollama":
-            req = urllib.request.Request(f"http://{host}:{port}/api/tags")
+            req = urllib.request.Request(f"{base_url}/api/tags", headers=headers)
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read())
                 return [m["name"] for m in data.get("models", [])]
         elif server_type == "openai":
-            req = urllib.request.Request(f"http://{host}:{port}/v1/models")
+            req = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read())
                 return [m["id"] for m in data.get("data", [])
@@ -1284,6 +1322,64 @@ def _llm_list_models(host, port, server_type):
     except Exception:
         pass
     return []
+
+
+def _filter_openai_summary_models(model_names):
+    blocked = (
+        "embedding", "whisper", "transcribe", "transcription",
+        "tts", "audio", "image", "moderation", "realtime",
+        "video", "search", "computer-use",
+    )
+    return sorted(
+        [name for name in model_names if name and not any(key in name.lower() for key in blocked)]
+    )
+
+
+def _summary_backend_label(summary_cfg):
+    if not summary_cfg:
+        return ""
+    if summary_cfg.provider == "openai":
+        return "OpenAI API"
+    if not summary_cfg.host:
+        return ""
+    srv_label = "Ollama" if summary_cfg.server_type == "ollama" else "OpenAI 相容"
+    return f"{srv_label} @ {summary_cfg.host}:{summary_cfg.port}"
+
+
+def _summary_target_label(summary_cfg):
+    if not summary_cfg:
+        return ""
+    if summary_cfg.provider == "openai":
+        return "OpenAI API"
+    if summary_cfg.host:
+        return f"{summary_cfg.host}:{summary_cfg.port}"
+    return ""
+
+
+def _summary_location_label(summary_cfg):
+    if not summary_cfg:
+        return "伺服器"
+    if summary_cfg.provider == "openai":
+        return "OpenAI"
+    return "本機" if summary_cfg.host in ("localhost", "127.0.0.1", "::1") else "伺服器"
+
+
+def _check_summary_backend(summary_cfg):
+    if not summary_cfg or not summary_cfg.model:
+        return False, []
+    if summary_cfg.provider == "openai":
+        models = _llm_list_models(None, None, "openai",
+                                  api_key=summary_cfg.api_key,
+                                  provider="openai")
+        return bool(models), models
+    if not summary_cfg.host:
+        return False, []
+    server_type = _detect_llm_server(summary_cfg.host, summary_cfg.port)
+    if not server_type:
+        return False, []
+    summary_cfg.server_type = server_type
+    models = _llm_list_models(summary_cfg.host, summary_cfg.port, server_type)
+    return True, models
 
 
 def _colorize_summary_line(line):
@@ -1316,13 +1412,16 @@ def _live_output_line(line, write_lock):
 
 
 def _llm_generate(prompt, model, host, port, server_type, stream=False,
-                  timeout=30, spinner=None, live_output=False, think=None):
+                  timeout=30, spinner=None, live_output=False, think=None,
+                  api_key="", provider="local"):
     """統一 LLM 生成介面，支援 Ollama 原生 API 和 OpenAI 相容 API
     think: True=啟用思考模式, False=關閉思考模式, None=不指定（由模型預設）"""
     write_lock = getattr(spinner, '_lock', None)
+    llm_kind = "openai" if provider == "openai" else server_type
+    base_url = _llm_http_base(host, port, provider=provider)
 
-    if server_type == "openai":
-        url = f"http://{host}:{port}/v1/chat/completions"
+    if llm_kind == "openai":
+        url = f"{base_url}/v1/chat/completions"
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
@@ -1333,7 +1432,7 @@ def _llm_generate(prompt, model, host, port, server_type, stream=False,
             payload["chat_template_kwargs"] = {"enable_thinking": False}
     else:
         # 預設 Ollama
-        url = f"http://{host}:{port}/api/generate"
+        url = f"{base_url}/api/generate"
         payload = {
             "model": model,
             "prompt": prompt,
@@ -1347,13 +1446,13 @@ def _llm_generate(prompt, model, host, port, server_type, stream=False,
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=data,
-        headers={"Content-Type": "application/json"},
+        headers=_llm_request_headers(provider=provider, api_key=api_key),
     )
 
     if not stream:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
-            if server_type == "openai":
+            if llm_kind == "openai":
                 return result["choices"][0]["message"]["content"].strip()
             else:
                 return result["response"].strip()
@@ -1363,7 +1462,7 @@ def _llm_generate(prompt, model, host, port, server_type, stream=False,
     token_count = 0
     line_buf = ""  # live_output 行緩衝（用於 markdown 著色）
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        if server_type == "openai":
+        if llm_kind == "openai":
             # SSE 格式：data: {...}\n\n
             for raw_line in resp:
                 line = raw_line.decode("utf-8").strip()
@@ -2202,6 +2301,190 @@ def _select_llm_model(host, port, server_type):
     return model
 
 
+def _remember_summary_model(summary_cfg):
+    if not summary_cfg or not summary_cfg.model:
+        return
+    key = "last_openai_summary_model" if summary_cfg.provider == "openai" else "last_summary_model"
+    if summary_cfg.model != _config.get(key):
+        _config[key] = summary_cfg.model
+        save_config(_config)
+
+
+def _make_summary_config(provider, model, host=None, port=None, server_type=None, api_key=""):
+    if provider == "openai":
+        return SummaryLLMConfig(
+            provider="openai",
+            model=model,
+            server_type="openai",
+            api_key=api_key,
+        )
+    return SummaryLLMConfig(
+        provider="local",
+        model=model,
+        host=host,
+        port=port,
+        server_type=server_type or "ollama",
+    )
+
+
+def _ask_summary_provider():
+    default_idx = 0
+    print(f"\n\n{C_TITLE}{BOLD}▎ 摘要模型來源{RESET}")
+    print(f"{C_DIM}{'─' * 60}{RESET}")
+    col = max(_str_display_width(label) for _, label, _ in SUMMARY_PROVIDERS) + 2
+    for i, (key, label, desc) in enumerate(SUMMARY_PROVIDERS):
+        padded = label + ' ' * (col - _str_display_width(label))
+        if i == default_idx:
+            print(f"  {C_HIGHLIGHT}{BOLD}[{i}] {padded}{RESET} {C_WHITE}{desc}{RESET}  {C_HIGHLIGHT}{REVERSE} 預設 {RESET}")
+        else:
+            print(f"  {C_DIM}[{i}]{RESET} {C_WHITE}{padded}{RESET} {C_DIM}{desc}{RESET}")
+    print(f"{C_DIM}{'─' * 60}{RESET}")
+    print(f"{C_WHITE}按 Enter 使用預設，或輸入編號：{RESET}", end=" ")
+
+    user_input = input().strip()
+    idx = default_idx
+    if user_input:
+        try:
+            idx = int(user_input)
+            if not (0 <= idx < len(SUMMARY_PROVIDERS)):
+                idx = default_idx
+        except ValueError:
+            idx = default_idx
+    return SUMMARY_PROVIDERS[idx][0]
+
+
+def _prompt_openai_api_key_interactive():
+    api_key = (_config.get("openai_api_key") or "").strip()
+    if api_key:
+        return api_key
+
+    print(f"\n\n{C_TITLE}{BOLD}▎ OpenAI API Key{RESET}")
+    print(f"{C_DIM}{'─' * 60}{RESET}")
+    print(f"  {C_WHITE}尚未在 config.json 設定 openai_api_key{RESET}")
+    print(f"  {C_DIM}請輸入 OpenAI API Key，程式會儲存到 config.json 供之後摘要使用{RESET}")
+    print(f"{C_DIM}{'─' * 60}{RESET}")
+
+    while True:
+        try:
+            api_key = getpass.getpass(f"{C_WHITE}OpenAI API Key：{RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+        if api_key:
+            _config["openai_api_key"] = api_key
+            save_config(_config)
+            return api_key
+        print(f"  {C_HIGHLIGHT}[錯誤] OpenAI API Key 不能留空{RESET}")
+
+
+def _select_openai_summary_model_interactive(api_key):
+    model_names = _llm_list_models(None, None, "openai",
+                                   api_key=api_key, provider="openai")
+    candidates = _filter_openai_summary_models(model_names)
+    _last_model = _config.get("last_openai_summary_model")
+
+    if candidates:
+        print(f"\n\n{C_TITLE}{BOLD}▎ OpenAI 摘要模型{RESET}")
+        print(f"{C_DIM}{'─' * 60}{RESET}")
+        col = max(len(name) for name in candidates) + 2
+        for i, name in enumerate(candidates):
+            padded = name + ' ' * (col - len(name))
+            tag = f" {C_OK}{REVERSE} 前次使用 {RESET}" if name == _last_model else ""
+            print(f"  {C_DIM}[{i}]{RESET} {C_WHITE}{padded}{RESET}{tag}")
+        print(f"{C_DIM}{'─' * 60}{RESET}")
+        print(f"{C_WHITE}請輸入編號（OpenAI 不提供預設摘要模型）：{RESET}", end=" ")
+
+        while True:
+            user_input = input().strip()
+            if not user_input:
+                print(f"  {C_HIGHLIGHT}[錯誤] OpenAI 摘要模型必須明確選擇{RESET}")
+                print(f"{C_WHITE}請輸入編號：{RESET}", end=" ")
+                continue
+            try:
+                idx = int(user_input)
+                if 0 <= idx < len(candidates):
+                    model = candidates[idx]
+                    break
+            except ValueError:
+                pass
+            print(f"  {C_HIGHLIGHT}[錯誤] 請輸入有效編號{RESET}")
+            print(f"{C_WHITE}請輸入編號：{RESET}", end=" ")
+    else:
+        print(f"\n  {C_HIGHLIGHT}[警告] 無法取得可用的 OpenAI 摘要模型清單，改為手動輸入模型名稱{RESET}")
+        if _last_model:
+            print(f"  {C_DIM}前次使用: {_last_model}{RESET}")
+        while True:
+            print(f"{C_WHITE}OpenAI 模型名稱（必填）：{RESET}", end=" ")
+            model = input().strip()
+            if model:
+                break
+            print(f"  {C_HIGHLIGHT}[錯誤] OpenAI 模型名稱不能留空{RESET}")
+
+    summary_cfg = _make_summary_config("openai", model, api_key=api_key)
+    _remember_summary_model(summary_cfg)
+    return summary_cfg
+
+
+def _select_local_summary_model_interactive(host, port, server_type):
+    all_summary_models = _llm_list_models(host, port, server_type or "ollama")
+    summary_models_list = []
+    for m_name in all_summary_models:
+        desc = next((d for n, d in SUMMARY_MODELS if n == m_name), "")
+        summary_models_list.append((m_name, desc))
+    if not summary_models_list:
+        summary_models_list = [(n, d) for n, d in SUMMARY_MODELS]
+
+    _last_summary = _config.get("last_summary_model")
+    default_sm = 0
+    for i, (name, _) in enumerate(summary_models_list):
+        if name == SUMMARY_DEFAULT_MODEL:
+            default_sm = i
+            break
+
+    col = max(_str_display_width(name) for name, _ in summary_models_list) + 2
+    print(f"\n\n{C_TITLE}{BOLD}▎ 摘要模型{RESET}")
+    print(f"{C_DIM}{'─' * 60}{RESET}")
+    for i, (name, desc) in enumerate(summary_models_list):
+        padded = name + ' ' * (col - _str_display_width(name))
+        tags = []
+        if i == default_sm:
+            tags.append(f"{C_HIGHLIGHT}{REVERSE} 預設 {RESET}")
+        if name == _last_summary:
+            tags.append(f"{C_OK}{REVERSE} 前次使用 {RESET}")
+        tag_str = " ".join(tags)
+        if i == default_sm:
+            print(f"  {C_HIGHLIGHT}{BOLD}[{i}] {padded}{RESET} {C_WHITE}{desc}{RESET}  {tag_str}")
+        else:
+            print(f"  {C_DIM}[{i}]{RESET} {C_WHITE}{padded}{RESET} {C_DIM}{desc}{RESET}  {tag_str}")
+    _rec_sm = {n for n, _ in _BUILTIN_SUMMARY_MODELS}
+    _avail_sm = {n for n, _ in summary_models_list}
+    if not _rec_sm & _avail_sm:
+        _rec_sm_list = " / ".join(n for n, _ in _BUILTIN_SUMMARY_MODELS)
+        print(f"  {C_HIGHLIGHT}注意：本 LLM 伺服器未安裝推薦摘要模型（{_rec_sm_list}），摘要品質可能不如預期{RESET}")
+    print(f"{C_DIM}{'─' * 60}{RESET}")
+    print(f"{C_WHITE}按 Enter 使用預設，或輸入編號：{RESET}", end=" ")
+
+    user_input = input().strip()
+    if user_input:
+        try:
+            sm_idx = int(user_input)
+            if not (0 <= sm_idx < len(summary_models_list)):
+                sm_idx = default_sm
+        except ValueError:
+            sm_idx = default_sm
+    else:
+        sm_idx = default_sm
+    summary_cfg = _make_summary_config(
+        "local",
+        summary_models_list[sm_idx][0],
+        host=host,
+        port=port,
+        server_type=server_type or "ollama",
+    )
+    _remember_summary_model(summary_cfg)
+    return summary_cfg
+
+
 def _input_interactive_menu(args):
     """--input 互動選單：選擇模式、講者辨識、摘要"""
 
@@ -2536,97 +2819,46 @@ def _input_interactive_menu(args):
         summary_mode = summarize_options[s_idx][1]
         do_summarize = True
 
-        # 選了摘要 → 先確認 LLM 伺服器（若翻譯步驟未問過）→ 選摘要模型
-        summary_model = SUMMARY_DEFAULT_MODEL
+        # 選了摘要 → 選摘要 provider，再走對應設定
+        summary_cfg = None
         if do_summarize:
-            if not ollama_asked:
-                default_addr = f"{ollama_host}:{ollama_port}"
-                print(f"\n\n{C_TITLE}{BOLD}▎ LLM 伺服器{RESET}")
-                print(f"{C_DIM}{'─' * 60}{RESET}")
-                print(f"  {C_WHITE}目前設定: {default_addr}{RESET}")
-                print(f"{C_DIM}{'─' * 60}{RESET}")
-                print(f"{C_WHITE}按 Enter 使用目前設定，或輸入新位址（host:port）：{RESET}", end=" ")
-
-                addr_input = input().strip()
-                if addr_input:
-                    if ":" in addr_input:
-                        parts = addr_input.rsplit(":", 1)
-                        ollama_host = parts[0]
-                        try:
-                            ollama_port = int(parts[1])
-                        except ValueError:
-                            ollama_port = OLLAMA_PORT
-                    else:
-                        ollama_host = addr_input
-
-                # 偵測伺服器類型
-                print(f"  {C_DIM}正在偵測 LLM 伺服器...{RESET}", end=" ", flush=True)
-                llm_server_type, llm_models = _check_llm_server(ollama_host, ollama_port)
-                if llm_server_type:
-                    srv_label = "Ollama" if llm_server_type == "ollama" else "OpenAI 相容"
-                    print(f"{C_OK}✓ {srv_label} @ {ollama_host}:{ollama_port}（{len(llm_models)} 個模型）{RESET}")
-                else:
-                    print(f"{C_HIGHLIGHT}未偵測到 LLM 伺服器（{ollama_host}:{ollama_port}）{RESET}")
-                    print(f"  {C_HIGHLIGHT}⚠ 摘要功能需要 LLM 伺服器，請確認伺服器已啟動{RESET}")
-
-            # 摘要模型：列出伺服器上所有模型
-            all_summary_models = _llm_list_models(ollama_host, ollama_port, llm_server_type or "ollama")
-            summary_models_list = []
-            for m_name in all_summary_models:
-                desc = next((d for n, d in SUMMARY_MODELS if n == m_name), "")
-                summary_models_list.append((m_name, desc))
-            if not summary_models_list:
-                summary_models_list = [(n, d) for n, d in SUMMARY_MODELS]
-
-            _last_summary = _config.get("last_summary_model")
-            default_sm = 0
-            for i, (name, _) in enumerate(summary_models_list):
-                if name == SUMMARY_DEFAULT_MODEL:
-                    default_sm = i
-                    break
-
-            def _dw_sm(s):
-                return sum(2 if '\u4e00' <= c <= '\u9fff' else 1 for c in s)
-
-            col = max(_dw_sm(name) for name, _ in summary_models_list) + 2
-            print(f"\n\n{C_TITLE}{BOLD}▎ 摘要模型{RESET}")
-            print(f"{C_DIM}{'─' * 60}{RESET}")
-            for i, (name, desc) in enumerate(summary_models_list):
-                padded = name + ' ' * (col - _dw_sm(name))
-                tags = []
-                if i == default_sm:
-                    tags.append(f"{C_HIGHLIGHT}{REVERSE} 預設 {RESET}")
-                if name == _last_summary:
-                    tags.append(f"{C_OK}{REVERSE} 前次使用 {RESET}")
-                tag_str = " ".join(tags)
-                if i == default_sm:
-                    print(f"  {C_HIGHLIGHT}{BOLD}[{i}] {padded}{RESET} {C_WHITE}{desc}{RESET}  {tag_str}")
-                else:
-                    print(f"  {C_DIM}[{i}]{RESET} {C_WHITE}{padded}{RESET} {C_DIM}{desc}{RESET}  {tag_str}")
-            # 檢查推薦摘要模型是否存在於伺服器
-            _rec_sm = {n for n, _ in _BUILTIN_SUMMARY_MODELS}
-            _avail_sm = {n for n, _ in summary_models_list}
-            if not _rec_sm & _avail_sm:
-                _rec_sm_list = " / ".join(n for n, _ in _BUILTIN_SUMMARY_MODELS)
-                print(f"  {C_HIGHLIGHT}注意：本 LLM 伺服器未安裝推薦摘要模型（{_rec_sm_list}），摘要品質可能不如預期{RESET}")
-            print(f"{C_DIM}{'─' * 60}{RESET}")
-            print(f"{C_WHITE}按 Enter 使用預設，或輸入編號：{RESET}", end=" ")
-
-            user_input = input().strip()
-            if user_input:
-                try:
-                    sm_idx = int(user_input)
-                    if not (0 <= sm_idx < len(summary_models_list)):
-                        sm_idx = default_sm
-                except ValueError:
-                    sm_idx = default_sm
+            summary_provider = _ask_summary_provider()
+            if summary_provider == "openai":
+                api_key = _prompt_openai_api_key_interactive()
+                summary_cfg = _select_openai_summary_model_interactive(api_key)
             else:
-                sm_idx = default_sm
-            summary_model = summary_models_list[sm_idx][0]
-            # 記住本次使用的摘要模型
-            if summary_model != _config.get("last_summary_model"):
-                _config["last_summary_model"] = summary_model
-                save_config(_config)
+                if not ollama_asked:
+                    default_addr = f"{ollama_host}:{ollama_port}"
+                    print(f"\n\n{C_TITLE}{BOLD}▎ LLM 伺服器{RESET}")
+                    print(f"{C_DIM}{'─' * 60}{RESET}")
+                    print(f"  {C_WHITE}目前設定: {default_addr}{RESET}")
+                    print(f"{C_DIM}{'─' * 60}{RESET}")
+                    print(f"{C_WHITE}按 Enter 使用目前設定，或輸入新位址（host:port）：{RESET}", end=" ")
+
+                    addr_input = input().strip()
+                    if addr_input:
+                        if ":" in addr_input:
+                            parts = addr_input.rsplit(":", 1)
+                            ollama_host = parts[0]
+                            try:
+                                ollama_port = int(parts[1])
+                            except ValueError:
+                                ollama_port = OLLAMA_PORT
+                        else:
+                            ollama_host = addr_input
+
+                    print(f"  {C_DIM}正在偵測 LLM 伺服器...{RESET}", end=" ", flush=True)
+                    llm_server_type, llm_models = _check_llm_server(ollama_host, ollama_port)
+                    if llm_server_type:
+                        srv_label = "Ollama" if llm_server_type == "ollama" else "OpenAI 相容"
+                        print(f"{C_OK}✓ {srv_label} @ {ollama_host}:{ollama_port}（{len(llm_models)} 個模型）{RESET}")
+                    else:
+                        print(f"{C_HIGHLIGHT}未偵測到 LLM 伺服器（{ollama_host}:{ollama_port}）{RESET}")
+                        print(f"  {C_HIGHLIGHT}⚠ 摘要功能需要 LLM 伺服器，請確認伺服器已啟動{RESET}")
+
+                summary_cfg = _select_local_summary_model_interactive(
+                    ollama_host, ollama_port, llm_server_type
+                )
 
         # 記住 LLM 伺服器位址（如果有改）
         if ollama_host != OLLAMA_HOST or ollama_port != OLLAMA_PORT:
@@ -2679,12 +2911,15 @@ def _input_interactive_menu(args):
             diarize_desc += "，本機"
         print(f"  {C_OK}  講者辨識: {diarize_desc}{RESET}")
         if do_summarize:
-            print(f"  {C_OK}  摘要模型: {summary_model}{RESET}  {C_DIM}@ {ollama_host}:{ollama_port}{RESET}")
+            if summary_cfg and summary_cfg.provider == "openai":
+                print(f"  {C_OK}  摘要模型: {summary_cfg.model}{RESET}  {C_DIM}@ OpenAI API{RESET}")
+            elif summary_cfg:
+                print(f"  {C_OK}  摘要模型: {summary_cfg.model}{RESET}  {C_DIM}@ {summary_cfg.host}:{summary_cfg.port}{RESET}")
         if meeting_topic:
             print(f"  {C_OK}  會議主題: {meeting_topic}{RESET}")
         print()
 
-        return (mode_key, fw_model, ollama_model, summary_model,
+        return (mode_key, fw_model, ollama_model, summary_cfg,
                 ollama_host, ollama_port, diarize, num_speakers, do_summarize,
                 llm_server_type, use_remote_whisper, meeting_topic, summary_mode)
 
@@ -4924,24 +5159,25 @@ class _SummaryStatusBar:
             self._active = False
 
 
-def call_ollama_raw(prompt, model, host, port, timeout=300, spinner=None, live_output=False,
-                    server_type="ollama"):
+def call_llm_raw(prompt, llm_cfg, timeout=300, spinner=None, live_output=False):
     """直接呼叫 LLM API 取得回應（串流模式，可更新 spinner 進度或即時輸出）"""
     return _llm_generate(
-        prompt, model, host, port, server_type,
+        prompt, llm_cfg.model, llm_cfg.host, llm_cfg.port, llm_cfg.server_type,
         stream=True, timeout=timeout,
         spinner=spinner, live_output=live_output,
+        api_key=llm_cfg.api_key,
+        provider=llm_cfg.provider,
     )
 
 
-def query_ollama_num_ctx(model, host, port, server_type="ollama"):
+def query_llm_num_ctx(llm_cfg):
     """查詢模型的 context window 大小（token 數），查不到回傳 None
     Ollama 用 /api/show，OpenAI 相容無標準對應（直接回傳 None）"""
-    if server_type == "openai":
+    if not llm_cfg or llm_cfg.provider == "openai" or llm_cfg.server_type == "openai":
         return None  # OpenAI 相容 API 無標準對應，用 fallback
     try:
-        url = f"http://{host}:{port}/api/show"
-        payload = json.dumps({"name": model}).encode("utf-8")
+        url = f"http://{llm_cfg.host}:{llm_cfg.port}/api/show"
+        payload = json.dumps({"name": llm_cfg.model}).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload,
             headers={"Content-Type": "application/json"},
@@ -5852,9 +6088,8 @@ def _fix_speaker_labels_in_text(text):
     return "\n".join(result)
 
 
-def summarize_log_file(input_path, model, host, port, server_type="ollama",
-                       topic=None, metadata=None, summary_mode="both",
-                       audio_path=""):
+def summarize_log_file(input_path, summary_cfg, topic=None, metadata=None,
+                       summary_mode="both", audio_path=""):
     """讀取記錄檔 → 建 prompt → 呼叫 LLM → 簡繁轉換 → 寫摘要檔
     summary_mode: "both"（摘要+逐字稿）、"summary"（只摘要）、"transcript"（只逐字稿）
     回傳 (output_path, summary_text, html_path)"""
@@ -5890,7 +6125,7 @@ def summarize_log_file(input_path, model, host, port, server_type="ollama",
     output_path = os.path.join(dirpath, out_name)
 
     # 查詢模型 context window，動態決定分段大小
-    num_ctx = query_ollama_num_ctx(model, host, port, server_type=server_type)
+    num_ctx = query_llm_num_ctx(summary_cfg)
     max_chars = _calc_chunk_max_chars(num_ctx)
     if num_ctx:
         print(f"  {C_DIM}模型 context window: {num_ctx:,} tokens → 每段上限約 {max_chars:,} 字{RESET}")
@@ -5901,23 +6136,21 @@ def summarize_log_file(input_path, model, host, port, server_type="ollama",
     chunks = _split_transcript_chunks(transcript, max_chars)
     print()  # 空行，與下方摘要內容做視覺區隔
 
-    _llm_loc = "本機" if host in ("localhost", "127.0.0.1", "::1") else "伺服器"
-    sbar = _SummaryStatusBar(model=model, task="準備中", location=_llm_loc).start()
+    _llm_loc = _summary_location_label(summary_cfg)
+    sbar = _SummaryStatusBar(model=summary_cfg.model, task="準備中", location=_llm_loc).start()
 
     if len(chunks) <= 1:
         # 單段：直接摘要
         prompt = _summary_prompt(transcript, topic=topic, summary_mode=summary_mode)
         sbar.set_task(f"生成摘要（單段，{len(transcript)} 字）")
-        summary = call_ollama_raw(prompt, model, host, port, spinner=sbar, live_output=True,
-                                  server_type=server_type)
+        summary = call_llm_raw(prompt, summary_cfg, spinner=sbar, live_output=True)
     else:
         # 多段：逐段摘要 + 合併
         segment_summaries = []
         for i, chunk in enumerate(chunks):
             sbar.set_task(f"第 {i+1}/{len(chunks)} 段（{len(chunk)} 字）")
             prompt = _summary_prompt(chunk, topic=topic, summary_mode=summary_mode)
-            seg = call_ollama_raw(prompt, model, host, port, spinner=sbar, live_output=True,
-                                  server_type=server_type)
+            seg = call_llm_raw(prompt, summary_cfg, spinner=sbar, live_output=True)
             seg = S2TWP.convert(seg)
             segment_summaries.append(seg)
             print(f"  {C_OK}第 {i+1}/{len(chunks)} 段完成{RESET}", flush=True)
@@ -5947,8 +6180,7 @@ def summarize_log_file(input_path, model, host, port, server_type="ollama",
                     "以下是各段摘要：",
                     f"- 本次會議主題：{topic}，請根據此主題的領域知識整理重點\n\n以下是各段摘要：",
                 )
-            merged_summary = call_ollama_raw(merge_prompt, model, host, port, spinner=sbar, live_output=True,
-                                             server_type=server_type)
+            merged_summary = call_llm_raw(merge_prompt, summary_cfg, spinner=sbar, live_output=True)
 
             if summary_mode == "summary":
                 # 只要摘要：跳過逐字稿提取
@@ -6000,9 +6232,9 @@ def summarize_log_file(input_path, model, host, port, server_type="ollama",
 ---
 {_retry_input}
 ---"""
-        sbar_retry = _SummaryStatusBar(model=model, task="補產重點摘要", location=_llm_loc).start()
-        _retry_result = call_ollama_raw(_retry_prompt, model, host, port, spinner=sbar_retry,
-                                        live_output=True, server_type=server_type)
+        sbar_retry = _SummaryStatusBar(model=summary_cfg.model, task="補產重點摘要", location=_llm_loc).start()
+        _retry_result = call_llm_raw(_retry_prompt, summary_cfg, spinner=sbar_retry,
+                                     live_output=True)
         sbar_retry.stop()
         _retry_result = S2TWP.convert(_retry_result)
         # 將重點摘要放在前面，校正逐字稿放在後面
@@ -7075,8 +7307,11 @@ def parse_args():
         "--summarize", nargs="*", metavar="FILE", default=None,
         help="摘要模式：讀取記錄檔生成摘要後離開（與 --input 合用時不需指定檔案）")
     parser.add_argument(
-        "--summary-model", metavar="MODEL", default=SUMMARY_DEFAULT_MODEL,
-        help=f"摘要用的 LLM 模型 (預設 {SUMMARY_DEFAULT_MODEL})")
+        "--summary-provider", choices=["local", "openai"], metavar="PROVIDER",
+        help="摘要模型來源 (local=本機/區網 LLM 伺服器 / openai=OpenAI 官方 API，預設 local)")
+    parser.add_argument(
+        "--summary-model", metavar="MODEL", default=None,
+        help=f"摘要用的 LLM 模型 (local 預設 {SUMMARY_DEFAULT_MODEL}；openai 必填)")
     parser.add_argument(
         "--diarize", action="store_true",
         help="講者辨識（需搭配 --input，用 resemblyzer + spectralcluster）")
@@ -7192,6 +7427,26 @@ def _resolve_ollama_host(args):
     return host, port
 
 
+def _resolve_summary_config(args, host=None, port=None, server_type=None):
+    provider = getattr(args, "summary_provider", None) or "local"
+    if provider == "openai":
+        api_key = (_config.get("openai_api_key") or "").strip()
+        if not api_key:
+            print(f"{C_HIGHLIGHT}[錯誤] summary provider=openai 需要先在 config.json 設定 openai_api_key{RESET}",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not args.summary_model:
+            print(f"{C_HIGHLIGHT}[錯誤] --summary-provider openai 時必須明確指定 --summary-model{RESET}",
+                  file=sys.stderr)
+            sys.exit(1)
+        return _make_summary_config("openai", args.summary_model, api_key=api_key)
+
+    if host is None or port is None:
+        host, port = _resolve_ollama_host(args)
+    model = args.summary_model or SUMMARY_DEFAULT_MODEL
+    return _make_summary_config("local", model, host=host, port=port, server_type=server_type)
+
+
 def _build_cli_command(**kwargs):
     """根據設定組裝等效的 ./start.sh CLI 指令字串（所有有值的參數都明確列出）"""
     import shlex
@@ -7259,6 +7514,10 @@ def _build_cli_command(**kwargs):
     if summarize:
         parts.append("--summarize")
 
+    summary_provider = kwargs.get("summary_provider")
+    if summary_provider:
+        parts.append(f"--summary-provider {summary_provider}")
+
     summary_model = kwargs.get("summary_model")
     if summary_model:
         parts.append(f"--summary-model {shlex.quote(summary_model)}")
@@ -7323,15 +7582,15 @@ def main():
             print("[錯誤] 純錄音模式不適用於離線處理（--input）", file=sys.stderr)
             sys.exit(1)
         # 決定參數來源：有任何使用者明確傳入的 CLI 參數 → CLI 模式；全無 → 互動選單
-        # 注意：args.summary_model 有 argparse 預設值，不能用來判斷
         _has_cli_args = (args.mode is not None or args.model or
                          args.diarize or
                          args.num_speakers or args.summarize is not None or
                          args.engine or args.ollama_model or
-                         args.ollama_host or
+                         args.ollama_host or args.summary_provider or
+                         args.summary_model or
                          args.local_asr or getattr(args, 'topic', None))
         if not _has_cli_args:
-            (mode, fw_model, ollama_model, summary_model,
+            (mode, fw_model, ollama_model, summary_cfg,
              host, port, diarize, num_speakers, do_summarize,
              server_type, use_remote_whisper, meeting_topic,
              summary_mode) = _input_interactive_menu(args)
@@ -7372,7 +7631,9 @@ def main():
                         engine = "argos"
             else:
                 engine = "llm"
-            summary_model = args.summary_model
+            summary_cfg = _resolve_summary_config(
+                args, host=host, port=port, server_type=server_type
+            ) if do_summarize else None
             # 遠端 GPU：有設定且未指定 --local-asr
             use_remote_whisper = (REMOTE_WHISPER_CONFIG is not None
                                  and not args.local_asr)
@@ -7406,28 +7667,39 @@ def main():
             print(f"\n\n{C_TITLE}{BOLD}▎ 連線檢查{RESET}")
             print(f"{C_DIM}{'─' * 60}{RESET}")
 
-        if need_llm_translate or do_summarize:
+        translate_srv_label = ""
+        if need_llm_translate:
             if not server_type:
                 server_type = _detect_llm_server(host, port)
             if server_type:
-                srv_label = "Ollama" if server_type == "ollama" else "OpenAI 相容"
-                if need_llm_translate:
-                    print(f"  {C_WHITE}LLM 翻譯    {RESET}{C_WHITE}{ollama_model}{RESET} {C_DIM}@ {host}:{port} ({srv_label}){RESET} {C_OK}✓{RESET}")
-                if do_summarize:
-                    print(f"  {C_WHITE}LLM 摘要    {RESET}{C_WHITE}{summary_model}{RESET} {C_DIM}@ {host}:{port} ({srv_label}){RESET} {C_OK}✓{RESET}")
+                translate_srv_label = "Ollama" if server_type == "ollama" else "OpenAI 相容"
+                print(f"  {C_WHITE}LLM 翻譯    {RESET}{C_WHITE}{ollama_model}{RESET} {C_DIM}@ {host}:{port} ({translate_srv_label}){RESET} {C_OK}✓{RESET}")
                 ollama_available = True
             else:
-                label = "LLM" if need_llm_translate else "LLM 摘要"
-                model_name_display = ollama_model if need_llm_translate else summary_model
-                pad = " " * (12 - _str_display_width(label))
-                print(f"  {C_WHITE}{label}{pad}{RESET}{C_WHITE}{model_name_display}{RESET} {C_DIM}@ {host}:{port}{RESET} {C_HIGHLIGHT}✗ 無法連接{RESET}")
+                print(f"  {C_WHITE}LLM 翻譯    {RESET}{C_WHITE}{ollama_model}{RESET} {C_DIM}@ {host}:{port}{RESET} {C_HIGHLIGHT}✗ 無法連接{RESET}")
+
+        summary_available = False
+        summary_remote_models = []
+        if do_summarize and summary_cfg:
+            summary_available, summary_remote_models = _check_summary_backend(summary_cfg)
+            summary_target = _summary_target_label(summary_cfg)
+            if summary_available:
+                if summary_cfg.provider == "openai":
+                    print(f"  {C_WHITE}LLM 摘要    {RESET}{C_WHITE}{summary_cfg.model}{RESET} {C_DIM}@ {summary_target}{RESET} {C_OK}✓{RESET}")
+                else:
+                    summary_srv_label = "Ollama" if summary_cfg.server_type == "ollama" else "OpenAI 相容"
+                    print(f"  {C_WHITE}LLM 摘要    {RESET}{C_WHITE}{summary_cfg.model}{RESET} {C_DIM}@ {summary_target} ({summary_srv_label}){RESET} {C_OK}✓{RESET}")
+                if summary_remote_models and summary_cfg.model not in set(summary_remote_models):
+                    print(f"  {C_HIGHLIGHT}[警告] 摘要模型 {summary_cfg.model} 不在可用清單中，執行時可能失敗{RESET}")
+            else:
+                print(f"  {C_WHITE}LLM 摘要    {RESET}{C_WHITE}{summary_cfg.model}{RESET} {C_DIM}@ {summary_target}{RESET} {C_HIGHLIGHT}✗ 無法連接{RESET}")
 
         if not server_type:
             server_type = "ollama"
 
         # 初始化翻譯器（meeting_topic 已在互動選單或 CLI 分支中設定）
         translator = None
-        can_summarize = ollama_available
+        can_summarize = summary_available
         if need_translate:
             if engine == "llm" and ollama_available:
                 translator = OllamaTranslator(ollama_model, host, port, direction=mode,
@@ -7449,7 +7721,7 @@ def main():
                 translator = ArgosTranslator()
 
         if do_summarize and not can_summarize:
-            print(f"  {C_HIGHLIGHT}[警告] LLM 伺服器無法連接，摘要將跳過（逐字稿完成後可用 --summarize 補做）{RESET}")
+            print(f"  {C_HIGHLIGHT}[警告] 摘要模型來源無法連接，摘要將跳過（逐字稿完成後可用 --summarize 補做）{RESET}")
 
         # 遠端 GPU 啟動與 health check
         remote_whisper_cfg = None
@@ -7501,8 +7773,8 @@ def main():
                 sp_info += "，本機"
             sp_info += f"，{num_speakers} 人" if num_speakers else "，自動偵測"
             print(f"  {C_WHITE}講者辨識    {sp_info}{RESET}")
-        if do_summarize and host:
-            print(f"  {C_WHITE}摘要模型    {summary_model} @ {host}:{port}{RESET}")
+        if do_summarize and summary_cfg:
+            print(f"  {C_WHITE}摘要模型    {summary_cfg.model} @ {_summary_target_label(summary_cfg)}{RESET}")
         if meeting_topic:
             print(f"  {C_WHITE}會議主題    {meeting_topic}{RESET}")
         print(f"  {C_WHITE}檔案數      {RESET}{C_DIM}{len(args.input)}{RESET}")
@@ -7510,7 +7782,9 @@ def main():
         # CLI 指令回顯 + 確認（在設定總覽區塊內）
         _cli_kw = dict(input_files=args.input, mode=mode, model=fw_model,
                        diarize=diarize, num_speakers=num_speakers,
-                       summarize=do_summarize, summary_model=summary_model,
+                       summarize=do_summarize,
+                       summary_provider=summary_cfg.provider if summary_cfg else None,
+                       summary_model=summary_cfg.model if summary_cfg else None,
                        engine=engine if engine == "argos" else None,
                        llm_model=ollama_model if need_translate and engine == "llm" else None,
                        llm_host=f"{host}:{port}" if need_translate and engine == "llm" and host else None,
@@ -7544,8 +7818,7 @@ def main():
         if do_summarize and log_paths and can_summarize:
             print(f"\n\n{C_TITLE}{BOLD}▎ 自動摘要{RESET}")
             print(f"{C_DIM}{'─' * 60}{RESET}")
-            print(f"  {C_DIM}摘要模型: {summary_model} ({host}:{port}){RESET}")
-            srv_label = "Ollama" if server_type == "ollama" else "OpenAI 相容"
+            print(f"  {C_DIM}摘要模型: {summary_cfg.model} ({_summary_target_label(summary_cfg)}){RESET}")
 
             for lp, orig_fpath, sess_dir in log_paths:
                 print(f"\n  {C_DIM}摘要: {os.path.basename(lp)}{RESET}")
@@ -7562,11 +7835,11 @@ def main():
                     "diarize_location": f"遠端 GPU ({remote_whisper_cfg.get('host', '?')})" if diarize and remote_whisper_cfg else ("本機" if diarize else None),
                     "num_speakers": num_speakers if num_speakers else "自動偵測",
                     "translate_model": ollama_model if need_translate and ollama_available else None,
-                    "translate_server": f"{srv_label} @ {host}:{port}" if need_translate and ollama_available else None,
+                    "translate_server": f"{translate_srv_label} @ {host}:{port}" if need_translate and ollama_available else None,
                     "input_format": os.path.splitext(orig_fpath)[1].lstrip(".").lower(),
                     "input_file": os.path.basename(orig_fpath),
-                    "summary_model": summary_model,
-                    "summary_server": f"{srv_label} @ {host}:{port}",
+                    "summary_model": summary_cfg.model,
+                    "summary_server": _summary_backend_label(summary_cfg),
                 }
                 # 從逐字稿計算實際講者數
                 if diarize:
@@ -7582,12 +7855,13 @@ def main():
                     except Exception:
                         pass
                 try:
-                    out_path, _, html_path = summarize_log_file(lp, summary_model, host, port,
-                                                                  server_type=server_type,
-                                                                  topic=meeting_topic,
-                                                                  metadata=_meta,
-                                                                  summary_mode=summary_mode,
-                                                                  audio_path=audio_in_session)
+                    out_path, _, html_path = summarize_log_file(
+                        lp, summary_cfg,
+                        topic=meeting_topic,
+                        metadata=_meta,
+                        summary_mode=summary_mode,
+                        audio_path=audio_in_session,
+                    )
                     if out_path:
                         if html_path:
                             html_to_open.append(html_path)
@@ -7629,24 +7903,23 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
         host, port = _resolve_ollama_host(args)
-        model = args.summary_model
+        summary_cfg = _resolve_summary_config(args, host=host, port=port)
 
         print(f"\n\n{C_TITLE}{BOLD}▎ 批次摘要模式{RESET}")
         print(f"{C_DIM}{'─' * 60}{RESET}")
-        print(f"  {C_DIM}摘要模型: {model} ({host}:{port}){RESET}")
+        print(f"  {C_DIM}摘要模型: {summary_cfg.model} ({_summary_target_label(summary_cfg)}){RESET}")
 
-        print(f"  {C_DIM}正在連接 LLM 伺服器...{RESET}", end=" ", flush=True)
-        server_type = _detect_llm_server(host, port)
-        if server_type:
-            srv_label = "Ollama" if server_type == "ollama" else "OpenAI 相容"
-            remote_models = _llm_list_models(host, port, server_type)
+        print(f"  {C_DIM}正在連接摘要模型來源...{RESET}", end=" ", flush=True)
+        summary_ok, remote_models = _check_summary_backend(summary_cfg)
+        if summary_ok:
+            srv_label = _summary_backend_label(summary_cfg)
             remote_set = set(remote_models)
-            if model not in remote_set:
-                print(f"\n{C_HIGHLIGHT}[警告] 模型 {model} 不在伺服器上，可用模型: {', '.join(sorted(remote_set))}{RESET}")
+            if remote_set and summary_cfg.model not in remote_set:
+                print(f"\n{C_HIGHLIGHT}[警告] 模型 {summary_cfg.model} 不在可用清單中，可用模型: {', '.join(sorted(remote_set))}{RESET}")
             else:
-                print(f"{C_OK}{BOLD}{srv_label}（{len(remote_models)} 個模型）{RESET}")
+                print(f"{C_OK}{BOLD}{srv_label}{RESET}")
         else:
-            print(f"\n{C_HIGHLIGHT}[錯誤] 無法連接 LLM 伺服器 ({host}:{port}){RESET}",
+            print(f"\n{C_HIGHLIGHT}[錯誤] 無法連接摘要模型來源 ({_summary_target_label(summary_cfg)}){RESET}",
                   file=sys.stderr)
             sys.exit(1)
 
@@ -7692,7 +7965,7 @@ def main():
             output_path = os.path.join(LOG_DIR, out_name)
 
             # 查詢模型 context window
-            num_ctx = query_ollama_num_ctx(model, host, port, server_type=server_type)
+            num_ctx = query_llm_num_ctx(summary_cfg)
             max_chars = _calc_chunk_max_chars(num_ctx)
             if num_ctx:
                 print(f"  {C_DIM}模型 context window: {num_ctx:,} tokens → 每段上限約 {max_chars:,} 字{RESET}")
@@ -7701,8 +7974,8 @@ def main():
             combined_transcript = combined_transcript.strip()
             chunks = _split_transcript_chunks(combined_transcript, max_chars)
             print()  # 空行，與下方摘要內容做視覺區隔
-            _llm_loc = "本機" if host in ("localhost", "127.0.0.1", "::1") else "伺服器"
-            sbar = _SummaryStatusBar(model=model, task="準備中", location=_llm_loc).start()
+            _llm_loc = _summary_location_label(summary_cfg)
+            sbar = _SummaryStatusBar(model=summary_cfg.model, task="準備中", location=_llm_loc).start()
 
             _batch_topic = getattr(args, 'topic', None)
             _batch_summary_mode = "both"  # --summarize 批次模式預設
@@ -7710,16 +7983,14 @@ def main():
                 prompt = _summary_prompt(combined_transcript, topic=_batch_topic,
                                          summary_mode=_batch_summary_mode)
                 sbar.set_task(f"生成摘要（單段，{len(combined_transcript)} 字）")
-                summary = call_ollama_raw(prompt, model, host, port, spinner=sbar, live_output=True,
-                                          server_type=server_type)
+                summary = call_llm_raw(prompt, summary_cfg, spinner=sbar, live_output=True)
             else:
                 segment_summaries = []
                 for i, chunk in enumerate(chunks):
                     sbar.set_task(f"第 {i+1}/{len(chunks)} 段（{len(chunk)} 字）")
                     prompt = _summary_prompt(chunk, topic=_batch_topic,
                                              summary_mode=_batch_summary_mode)
-                    seg = call_ollama_raw(prompt, model, host, port, spinner=sbar, live_output=True,
-                                          server_type=server_type)
+                    seg = call_llm_raw(prompt, summary_cfg, spinner=sbar, live_output=True)
                     seg = S2TWP.convert(seg)
                     segment_summaries.append(seg)
                     print(f"  {C_OK}第 {i+1}/{len(chunks)} 段完成{RESET}", flush=True)
@@ -7734,8 +8005,7 @@ def main():
                         "以下是各段摘要：",
                         f"- 本次會議主題：{_batch_topic}，請根據此主題的領域知識整理重點\n\n以下是各段摘要：",
                     )
-                merged_summary = call_ollama_raw(merge_prompt, model, host, port, spinner=sbar, live_output=True,
-                                                 server_type=server_type)
+                merged_summary = call_llm_raw(merge_prompt, summary_cfg, spinner=sbar, live_output=True)
 
                 # 組合完整輸出：合併摘要在前，各段校正逐字稿在後
                 summary = merged_summary + "\n\n"
@@ -7782,9 +8052,9 @@ def main():
 ---
 {_retry_input}
 ---"""
-                sbar_retry = _SummaryStatusBar(model=model, task="補產重點摘要", location=_llm_loc).start()
-                _retry_result = call_ollama_raw(_retry_prompt, model, host, port, spinner=sbar_retry,
-                                                live_output=True, server_type=server_type)
+                sbar_retry = _SummaryStatusBar(model=summary_cfg.model, task="補產重點摘要", location=_llm_loc).start()
+                _retry_result = call_llm_raw(_retry_prompt, summary_cfg, spinner=sbar_retry,
+                                             live_output=True)
                 sbar_retry.stop()
                 _retry_result = S2TWP.convert(_retry_result)
                 summary = _retry_result.rstrip() + "\n\n" + summary.lstrip()
@@ -7794,8 +8064,8 @@ def main():
 
             # 組裝 metadata（批次摘要只有摘要模型資訊）
             _batch_meta = {
-                "summary_model": model,
-                "summary_server": f"{srv_label} @ {host}:{port}",
+                "summary_model": summary_cfg.model,
+                "summary_server": _summary_backend_label(summary_cfg),
                 "input_file": ", ".join(os.path.basename(f) for f in valid_files),
             }
             meta_header = _build_metadata_header(_batch_meta)

@@ -95,7 +95,7 @@ Author: Jason Cheng (Jason Tools)
 - Python 3.12+
 - [Homebrew](https://brew.sh/)（需事先安裝）
 - [BlackHole 2ch](https://existential.audio/blackhole/)（虛擬音訊驅動，安裝腳本會自動安裝）
-- 本地端 LLM 伺服器（推薦 [Ollama](https://ollama.com/)，翻譯/摘要用。推薦搭配 [NVIDIA DGX Spark](https://www.nvidia.com/zh-tw/products/workstations/dgx-spark/) 運行 Ollama，CP 值高。**沒有 LLM 伺服器也能用**：程式可切換為純本機 Argos 離線翻譯引擎，完全不需額外伺服器，但摘要功能需要 LLM）
+- 本地端 LLM 伺服器（推薦 [Ollama](https://ollama.com/)，翻譯/摘要用。推薦搭配 [NVIDIA DGX Spark](https://www.nvidia.com/zh-tw/products/workstations/dgx-spark/) 運行 Ollama，CP 值高。**沒有本地 LLM 伺服器也能做摘要**：可改用 OpenAI 官方 API；若完全不接 LLM，程式仍可切換為純本機 Argos 離線翻譯，但摘要功能需要 LLM）
 
 ### 磁碟空間需求
 
@@ -244,6 +244,24 @@ ollama pull qwen2.5:14b
 ./start.sh --summarize logs/英翻中_逐字稿_20260101_120000.txt
 ```
 
+### 使用 OpenAI 官方模型做摘要
+
+先在 `config.json` 設定 API key：
+
+```json
+{
+  "openai_api_key": "sk-..."
+}
+```
+
+再明確指定 provider 與模型：
+
+```bash
+./start.sh --summarize logs/英翻中_逐字稿_20260101_120000.txt \
+  --summary-provider openai \
+  --summary-model gpt-5-mini
+```
+
 ### 快捷鍵（即時模式）
 
 | 按鍵 | 功能 |
@@ -261,7 +279,8 @@ ollama pull qwen2.5:14b
 | `--llm-model MODEL` | LLM 翻譯模型 | qwen2.5:14b |
 | `--llm-host HOST` | LLM 伺服器位址 | 無（需設定） |
 | `--topic TOPIC` | 會議主題（提升翻譯品質） | |
-| `--summary-model MODEL` | 摘要用 LLM 模型 | gpt-oss:120b |
+| `--summary-provider PROVIDER` | 摘要模型來源 (local / openai) | local |
+| `--summary-model MODEL` | 摘要用 LLM 模型 | local: gpt-oss:120b / openai: 必填 |
 | `--input FILE` | 離線處理音訊檔 | |
 | `--diarize` | 啟用 AI 講者辨識 | |
 | `--num-speakers N` | 指定講者人數 | 自動偵測 |
