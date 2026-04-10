@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-jt-live-whisper 遠端 Whisper ASR 伺服器
+jt-live-whisper 伺服器 Whisper ASR 伺服器
 部署到 GPU 伺服器，提供 REST API 讓本機上傳音訊檔進行語音辨識。
 
 後端引擎自動偵測：

@@ -20,7 +20,7 @@ _COLS=$(tput cols 2>/dev/null || echo 60)
 [ "$_COLS" -lt 40 ] && _COLS=40
 _LINE=$(printf '%*s' "$_COLS" '' | tr ' ' '=')
 echo -e "${C_TITLE}${_LINE}${NC}"
-echo -e "${C_TITLE}${BOLD}  jt-live-whisper v2.1.3 - 100% 全地端 AI 語音工具集${NC}"
+echo -e "${C_TITLE}${BOLD}  jt-live-whisper v2.16.1 - 100% 全地端 AI 語音工具集${NC}"
 echo -e "${C_TITLE}  by Jason Cheng (Jason Tools)${NC}"
 echo -e "${C_TITLE}${_LINE}${NC}"
 echo ""
@@ -53,12 +53,12 @@ if [ "$SKIP_BLACKHOLE" -eq 0 ]; then
     HAS_BLACKHOLE=0
     HAS_MULTIOUT=0
     HAS_AGGREGATE=0
-    echo "$AUDIO_INFO" | grep -qi "blackhole" && HAS_BLACKHOLE=1
-    echo "$AUDIO_INFO" | grep -qiE "multi.output|多重輸出" && HAS_MULTIOUT=1
+    grep -i "blackhole" <<< "$AUDIO_INFO" >/dev/null 2>&1 && HAS_BLACKHOLE=1
+    grep -iE "multi.output|多重輸出" <<< "$AUDIO_INFO" >/dev/null 2>&1 && HAS_MULTIOUT=1
     # 聚集裝置偵測：名稱匹配 或 Input Channels >= 3（使用者可能改過名稱）
-    echo "$AUDIO_INFO" | grep -qiE "aggregate|聚集" && HAS_AGGREGATE=1
+    grep -iE "aggregate|聚集" <<< "$AUDIO_INFO" >/dev/null 2>&1 && HAS_AGGREGATE=1
     if [ "$HAS_AGGREGATE" -eq 0 ]; then
-        echo "$AUDIO_INFO" | grep -qE "Input Channels: [3-9]" && HAS_AGGREGATE=1
+        grep -E "Input Channels: [3-9]" <<< "$AUDIO_INFO" >/dev/null 2>&1 && HAS_AGGREGATE=1
     fi
 
     MISSING=""
@@ -128,7 +128,15 @@ fi
 
 echo ""
 
-python3 "$SCRIPT_DIR/translate_meeting.py" "$@"
+# --webui 模式：啟動 WebUI 伺服器（設定與字幕都在瀏覽器操作）
+_is_webui=0
+for _arg in "$@"; do [ "$_arg" = "--webui" ] && _is_webui=1 && break; done
+
+if [ $_is_webui -eq 1 ]; then
+    python3 "$SCRIPT_DIR/webui.py"
+else
+    python3 "$SCRIPT_DIR/translate_meeting.py" "$@"
+fi
 
 # 安全網：確保終端機恢復正常（防止 Ctrl+S raw mode 殘留）
 stty sane 2>/dev/null
